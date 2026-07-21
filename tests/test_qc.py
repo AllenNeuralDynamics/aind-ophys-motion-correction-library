@@ -1,0 +1,52 @@
+"""Tests for the quality_control.json collector."""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from aind_data_schema.core.quality_control import QualityControl, Status
+
+from aind_ophys_motion_correction_library import qc
+
+
+class TestQCMetrics(unittest.TestCase):
+    """Metric builders carry the standard tags and grouping."""
+
+    def test_registration_summary_metric(self):
+        """Registration-summary metric names, tags, and reference set."""
+        m = qc.build_registration_summary_metric("plane_0", "ref.png")
+        self.assertIn("plane_0", m.name)
+        self.assertEqual(m.tags["evaluation"], "Registration Summary")
+        self.assertEqual(m.reference, "ref.png")
+
+    def test_fov_quality_metric(self):
+        """FOV-quality metric carries the evaluation + type tags."""
+        m = qc.build_fov_quality_metric("plane_0", "combined.png")
+        self.assertEqual(m.tags["evaluation"], "FOV Quality")
+        self.assertEqual(m.tags["type"], "Operational QC")
+
+    def test_pending_status(self):
+        """The default status history entry is PENDING."""
+        self.assertEqual(qc.pending_qc_status().status, Status.PENDING)
+
+
+class TestQualityControlCollector(unittest.TestCase):
+    """build_quality_control + write round-trip."""
+
+    def test_build_and_write(self):
+        """Metrics collect into a QualityControl that re-validates."""
+        d = Path(tempfile.mkdtemp())
+        metrics = [
+            qc.build_registration_summary_metric("plane_0", "a.png"),
+            qc.build_fov_quality_metric("plane_0", "b.png"),
+        ]
+        q = qc.build_quality_control(metrics)
+        self.assertEqual(q.default_grouping, ["evaluation"])
+        self.assertEqual(len(q.metrics), 2)
+        out = qc.write_quality_control_json(q, d)
+        self.assertEqual(out.name, "quality_control.json")
+        QualityControl.model_validate_json(out.read_text())
+
+
+if __name__ == "__main__":
+    unittest.main()
