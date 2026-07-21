@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import suite2p
 from aind_ophys_utils.video_utils import encode_video
-from log_schema.log import setup_logging
+from log_schema.main import setup_logging
 from PIL import Image
 
 from . import qc
