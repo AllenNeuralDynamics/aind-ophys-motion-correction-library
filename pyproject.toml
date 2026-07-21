@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "aind-ophys-motion-correction-library"
 description = "Suite2P-based motion correction for AIND optical physiology, with aind-data-schema v2 metadata I/O."
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 authors = [
     {name = "Allen Institute for Neural Dynamics"}
 ]
@@ -22,9 +22,9 @@ dependencies = [
     "aind-qcportal-schema>=0.6.4",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     "aind-ophys-utils",
-    "suite2p",
+    "torch",
+    "suite2p==0.14.6",
     "sbxreader",
-    "ScanImageTiffReader",
     "numpy",
     "pandas",
     "h5py",
@@ -50,6 +50,17 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Pull torch from the PyTorch CPU wheel index (preserves the original
+# capsule's CPU-only torch install; suite2p otherwise resolves the large
+# default CUDA build). Honored by uv; GPU runs override via the CO base image.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.black]
 line-length = 79
