@@ -4,10 +4,11 @@ Kept import-light (pydantic + stdlib only) so it stays cheap to import
 and free of aind-data-schema / suite2p side effects.
 """
 
+import json
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -27,6 +28,12 @@ class MotionCorrectionSettings(BaseSettings, cli_parse_args=True):
         default=Path("/results/"), description="Output directory"
     )
     debug: bool = Field(default=False, description="Run with partial dataset")
+    verify: bool = Field(
+        default=False,
+        description="Round-trip the emitted processing.json / "
+        "quality_control.json through the core v2 schema objects after "
+        "writing, so bad output fails in-capsule rather than downstream",
+    )
     tmp_dir: Path = Field(
         default=Path("/scratch"),
         description="Directory for temporary files produced by Suite2P",
@@ -63,7 +70,8 @@ class MotionCorrectionSettings(BaseSettings, cli_parse_args=True):
     )
     block_size: list = Field(
         default_factory=lambda: [128, 128],
-        description="Block size for non-rigid registration.",
+        description="Block size for non-rigid registration. Accepts a CLI/env "
+        "string like '[128, 128]'; elements are coerced to int.",
     )
     snr_thresh: float = Field(
         default=1.2,
@@ -203,6 +211,20 @@ class MotionCorrectionSettings(BaseSettings, cli_parse_args=True):
         description="Number of steps to grid between smooth_sigma_time and "
         "smooth_sigma_time_max. Large values add significant time.",
     )
+
+    @field_validator("block_size", mode="before")
+    @classmethod
+    def _coerce_block_size(cls, value):
+        """Coerce a CLI/env block_size to a list of ints.
+
+        Accepts a JSON string (``"[128, 128]"``) or a list whose elements
+        may be strings, and returns a list of ints. Kept a plain ``list``
+        field (not ``List[int]``) so the auto-generated CO app-panel treats
+        it as a single string parameter rather than one integer.
+        """
+        if isinstance(value, str):
+            value = json.loads(value)
+        return [int(x) for x in value]
 
     class Config:
         """Pydantic settings config: env prefix + .env support."""

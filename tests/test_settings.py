@@ -35,6 +35,25 @@ class TestMotionCorrectionSettings(unittest.TestCase):
         self.assertIsNone(self._settings().frame_rate)
         self.assertEqual(self._settings(frame_rate=11.0).frame_rate, 11.0)
 
+    def test_block_size_cli_string_coerces_to_ints(self):
+        """A CLI '[128, 128]' block_size yields a list of ints."""
+        s = MotionCorrectionSettings(
+            _cli_parse_args=["--block_size=[100, 120]"]
+        )
+        self.assertEqual(s.block_size, [100, 120])
+        self.assertTrue(all(isinstance(x, int) for x in s.block_size))
+
+    def test_block_size_json_string_coerces_to_ints(self):
+        """A raw JSON-string block_size (env/kwarg) coerces to ints."""
+        s = self._settings(block_size="[64, 96]")
+        self.assertEqual(s.block_size, [64, 96])
+        self.assertTrue(all(isinstance(x, int) for x in s.block_size))
+
+    def test_verify_flag(self):
+        """verify defaults False and is settable."""
+        self.assertFalse(self._settings().verify)
+        self.assertTrue(self._settings(verify=True).verify)
+
     def test_overrides(self):
         """Explicit values override defaults."""
         s = self._settings(data_type="bruker", nonrigid=False)

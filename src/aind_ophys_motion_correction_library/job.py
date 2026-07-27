@@ -466,19 +466,15 @@ def _verify_outputs(output_dir: Path) -> None:
     )
 
 
-def run(
-    settings: Optional[MotionCorrectionSettings] = None,
-    verify: bool = False,
-) -> None:
+def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
     """Run Suite2P motion correction end to end.
 
     Parameters
     ----------
     settings : MotionCorrectionSettings, optional
-        Parsed settings; constructed from CLI/env when omitted.
-    verify : bool, optional
-        When True, round-trip the emitted metadata through the core v2
-        schema objects after writing them.
+        Parsed settings; constructed from CLI/env when omitted. When
+        ``settings.verify`` is True, the emitted metadata is round-tripped
+        through the core v2 schema objects after writing.
     """
     settings = settings or MotionCorrectionSettings()
     start_time = dt.now()
@@ -542,6 +538,6 @@ def run(
     except Exception:
         shutil.rmtree(tmp_dir.name, ignore_errors=True)
 
-    if verify:
+    if settings.verify:
         _verify_outputs(ctx["output_dir"])
     logger.info("stage_complete: motion correction")
