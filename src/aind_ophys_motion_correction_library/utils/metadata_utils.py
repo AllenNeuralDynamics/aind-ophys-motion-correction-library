@@ -1,32 +1,23 @@
 """aind-data-schema v1/v2 metadata reads for motion correction.
 
-Single point of contact for ``aind-data-schema`` / ``-models``. Reads raw
-dicts (no Pydantic validation on the read path), requires only the fields
-this capsule consumes, and fails fast with a clear error. Schema version is
-dispatched by which core acquisition file is present: ``session.json`` -> v1,
-``acquisition.json`` -> v2.
+A thin, capsule-specific layer over the shared ``aind_pophys_metadata``
+library. The v1/v2 dict paths, schema-version dispatch, and the
+``Processing`` builders live in the shared library; this module only assembles
+the motion-correction ``MotionCorrectionMetadata`` view and its
+motion-correction-specific ``DataProcess``.
 """
 
-import json
 import os
 from dataclasses import dataclass
 from datetime import datetime as dt
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import pytz
-from aind_data_schema.components.configs import ImagingConfig
-from aind_data_schema.components.identifiers import Code, DataAsset
-from aind_data_schema.core.processing import (
-    DataProcess,
-    Processing,
-    ProcessStage,
-)
+from aind_data_schema.core.processing import DataProcess, Processing
 from aind_data_schema_models.process_names import ProcessName
-
-# The v2 ImagingConfig discriminator, read from the schema rather than
-# hardcoded, so it tracks schema re-wordings.
-_IMAGING_CONFIG_TYPE = ImagingConfig.model_fields["object_type"].default
+from aind_pophys_metadata import fields, io
+from aind_pophys_metadata import processing as shared_processing
 
 _SEATTLE_TZ = pytz.timezone("America/Los_Angeles")
 
@@ -51,59 +42,6 @@ class MotionCorrectionMetadata:
     dataset_name: Optional[str] = None
 
 
-def _require(blob: dict, key: str, file_path: Path) -> Any:
-    """Return ``blob[key]`` or raise a KeyError naming the field + file."""
-    if key not in blob:
-        raise KeyError(f"Required field '{key}' missing from {file_path.name}")
-    return blob[key]
-
-
-def _load_json(path: Path) -> dict:
-    """Parse a JSON file into a dict."""
-    with open(path) as f:
-        return json.load(f)
-
-
-def _find(input_dir: Path, name: str) -> Optional[Path]:
-    """Return the first match for ``name`` under ``input_dir``, or None."""
-    return next(Path(input_dir).rglob(name), None)
-
-
-def _frame_rate_v1(session: dict) -> Optional[float]:
-    """Frame rate from a v1 session: first ophys_fov with a frame_rate."""
-    for stream in session.get("data_streams") or []:
-        fovs = stream.get("ophys_fovs") or []
-        if fovs and fovs[0].get("frame_rate") is not None:
-            return float(fovs[0]["frame_rate"])
-    return None
-
-
-def _frame_rate_v2(acquisition: dict) -> Optional[float]:
-    """Frame rate from a v2 ImagingConfig.sampling_strategy.frame_rate."""
-    for stream in acquisition.get("data_streams") or []:
-        for config in stream.get("configurations") or []:
-            if config.get("object_type") == _IMAGING_CONFIG_TYPE:
-                sampling = config.get("sampling_strategy") or {}
-                if sampling.get("frame_rate") is not None:
-                    return float(sampling["frame_rate"])
-    return None
-
-
-def _frame_rate_platform(platform: dict) -> Optional[float]:
-    """Frame rate from a v1 platform.json imaging_plane_groups."""
-    groups = platform.get("imaging_plane_groups") or []
-    if groups and groups[0].get("acquisition_framerate_Hz") is not None:
-        return float(groups[0]["acquisition_framerate_Hz"])
-    return None
-
-
-def _optional_field(path: Optional[Path], key: str) -> Optional[str]:
-    """Read one top-level key from an optional JSON file, else None."""
-    if path is None:
-        return None
-    return _load_json(path).get(key)
-
-
 def load_motion_correction_metadata(
     input_dir: Path,
 ) -> MotionCorrectionMetadata:
@@ -112,9 +50,8 @@ def load_motion_correction_metadata(
     Dispatches on which core file is present (``acquisition.json`` -> v2,
     ``session.json`` -> v1). ``frame_rate`` falls back to ``platform.json``
     when the core file lacks it; the caller applies any final CLI default.
-    ``subject_id`` and ``dataset_name`` are read independently from
-    ``subject.json`` / ``data_description.json`` (no cross-file
-    validation). Raises FileNotFoundError if neither core file is found.
+    ``subject_id`` is read from the core file (canonical) and falls back to
+    ``subject.json``; ``dataset_name`` comes from ``data_description.json``.
 
     Parameters
     ----------
@@ -125,42 +62,31 @@ def load_motion_correction_metadata(
     -------
     MotionCorrectionMetadata
         The minimal fields this capsule consumes.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither ``acquisition.json`` nor ``session.json`` is found.
+    ValueError
+        If both core files are present (ambiguous input).
     """
     input_dir = Path(input_dir)
-    acq_path = _find(input_dir, "acquisition.json")
-    session_path = _find(input_dir, "session.json")
+    core_path = io.find_acquisition_file(input_dir)
+    version = io.detect_schema_version(core_path)
+    core_raw = io.load_json(core_path)
 
-    dataset_name = _optional_field(
-        _find(input_dir, "data_description.json"), "name"
-    )
-    subject_id = _optional_field(
-        _find(input_dir, "subject.json"), "subject_id"
-    )
-
-    if acq_path is not None:
-        acquisition = _load_json(acq_path)
-        frame_rate = _frame_rate_v2(acquisition)
-        instrument_id = acquisition.get("instrument_id")
-    elif session_path is not None:
-        session = _load_json(session_path)
-        frame_rate = _frame_rate_v1(session)
-        instrument_id = session.get("rig_id")
-    else:
-        raise FileNotFoundError(
-            "No acquisition.json (v2) or session.json (v1) found under "
-            f"{input_dir}"
-        )
-
-    if frame_rate is None:
-        platform_path = _find(input_dir, "platform.json")
-        if platform_path is not None:
-            frame_rate = _frame_rate_platform(_load_json(platform_path))
+    platform_path = io.find(input_dir, "platform.json")
+    platform_raw = io.load_json(platform_path) if platform_path else None
+    subject_path = io.find(input_dir, "subject.json")
+    subject_raw = io.load_json(subject_path) if subject_path else None
+    dd_path = io.find(input_dir, "data_description.json")
+    dd_raw = io.load_json(dd_path) if dd_path else None
 
     return MotionCorrectionMetadata(
-        frame_rate=frame_rate,
-        instrument_id=instrument_id,
-        subject_id=subject_id,
-        dataset_name=dataset_name,
+        frame_rate=fields.get_frame_rate(version, core_raw, platform_raw),
+        instrument_id=fields.get_instrument_id(version, core_raw),
+        subject_id=fields.get_subject_id(core_raw, subject_raw),
+        dataset_name=fields.get_dataset_name(dd_raw),
     )
 
 
@@ -194,30 +120,27 @@ def build_data_process(
     DataProcess
         The populated motion-correction data process.
     """
-    return DataProcess(
+    code = shared_processing.build_code(
+        url=CODE_URL,
+        name="aind-ophys-motion-correction",
+        version=os.getenv("VERSION", ""),
+        parameters=parameters,
+        input_data=input_data,
+    )
+    return shared_processing.build_data_process(
         process_type=ProcessName.VIDEO_MOTION_CORRECTION,
+        code=code,
+        start_time=start_time.astimezone(_SEATTLE_TZ),
+        end_time=end_time.astimezone(_SEATTLE_TZ),
         name="Suite2P motion correction",
-        stage=ProcessStage.PROCESSING,
-        code=Code(
-            url=CODE_URL,
-            name="aind-ophys-motion-correction",
-            version=os.getenv("VERSION", ""),
-            parameters=parameters,
-            input_data=(
-                [DataAsset(name=n) for n in input_data] if input_data else None
-            ),
-        ),
-        experimenters=[],
-        start_date_time=start_time.astimezone(_SEATTLE_TZ),
-        end_date_time=end_time.astimezone(_SEATTLE_TZ),
         output_path=output_path,
-        output_parameters=output_parameters or {},
+        output_parameters=output_parameters,
     )
 
 
 def build_processing(data_processes: List[DataProcess]) -> Processing:
     """Wrap data processes into a full v2 Processing object."""
-    return Processing(data_processes=data_processes)
+    return shared_processing.build_processing(data_processes)
 
 
 def write_processing_json(processing: Processing, output_dir: Path) -> Path:
@@ -235,8 +158,4 @@ def write_processing_json(processing: Processing, output_dir: Path) -> Path:
     Path
         The path written.
     """
-    output_dir = Path(output_dir)
-    out_path = output_dir / "processing.json"
-    with open(out_path, "w") as f:
-        json.dump(json.loads(processing.model_dump_json()), f, indent=4)
-    return out_path
+    return shared_processing.write_processing_json(processing, output_dir)

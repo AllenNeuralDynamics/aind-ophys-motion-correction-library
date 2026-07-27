@@ -1,40 +1,27 @@
 """quality_control.json generation for motion correction.
 
-All QC lives here: metric builders return ``QCMetric`` objects, and the
-entrypoint accumulates them into ONE full ``QualityControl`` document via
-the collector pattern (never per-metric files). ``default_grouping`` is the
-project-standard ``["evaluation"]`` so the QC aggregator's
-``QualityControl.__add__`` merges cleanly.
+Capsule-specific metric content over the shared ``aind_pophys_metadata``
+QC builders: the metric skeleton, the PENDING status, the ``QualityControl``
+wrapper with the project-standard ``default_grouping``, and the writer all
+live in the shared library. ``job.run`` accumulates the metrics built here and
+emits ONE full ``quality_control.json`` (never per-metric files).
 """
 
-import json
-from datetime import datetime as dt
 from pathlib import Path
 from typing import List
 
-import pytz
 from aind_data_schema.core.quality_control import (
     QCMetric,
     QCStatus,
     QualityControl,
-    Stage,
     Status,
 )
-from aind_data_schema_models.modalities import Modality
-from aind_qcportal_schema.metric_value import DropdownMetric
-
-_SEATTLE_TZ = pytz.timezone("America/Los_Angeles")
-
-DEFAULT_GROUPING = ["evaluation"]
+from aind_pophys_metadata import quality_control as shared_qc
 
 
 def pending_qc_status() -> QCStatus:
     """Return a PENDING QCStatus timestamped to US/Pacific."""
-    return QCStatus(
-        evaluator="Pending review",
-        status=Status.PENDING,
-        timestamp=dt.now(_SEATTLE_TZ).isoformat(),
-    )
+    return shared_qc.pending_qc_status()
 
 
 def build_registration_summary_metric(
@@ -55,26 +42,20 @@ def build_registration_summary_metric(
     QCMetric
         The registration-summary metric (pending review).
     """
-    return QCMetric(
+    return shared_qc.dropdown_metric(
         name=f"{unique_id} Registration Summary",
-        modality=Modality.POPHYS,
-        stage=Stage.PROCESSING,
-        tags={"evaluation": "Registration Summary", "type": "Operational QC"},
+        evaluation="Registration Summary",
+        options=[
+            "Motion correction successful",
+            "No motion correction applied",
+            "Motion correction failed",
+            "Motion correction partially successful",
+        ],
+        status=[Status.PASS, Status.FAIL, Status.FAIL, Status.FAIL],
+        reference=reference_filepath,
         description=(
             "Review the registration summary plot to ensure that the "
             "motion correction is accurate and sufficient."
-        ),
-        status_history=[pending_qc_status()],
-        reference=reference_filepath,
-        value=DropdownMetric(
-            value="",
-            options=[
-                "Motion correction successful",
-                "No motion correction applied",
-                "Motion correction failed",
-                "Motion correction partially successful",
-            ],
-            status=[Status.PASS, Status.FAIL, Status.FAIL, Status.FAIL],
         ),
     )
 
@@ -97,43 +78,35 @@ def build_fov_quality_metric(
     QCMetric
         The FOV-quality metric (pending review).
     """
-    return QCMetric(
+    return shared_qc.dropdown_metric(
         name=f"{unique_id} FOV Quality",
-        modality=Modality.POPHYS,
-        stage=Stage.PROCESSING,
-        tags={"evaluation": "FOV Quality", "type": "Operational QC"},
+        evaluation="FOV Quality",
+        options=[
+            "Quality is sufficient",
+            "Timeseries shuffled between planes",
+            "Field of view associated with incorrect area and/or depth",
+            "Paired plane cross talk: Extreme",
+            "Paired plane cross-talk: Moderate",
+        ],
+        status=[
+            Status.PASS,
+            Status.FAIL,
+            Status.FAIL,
+            Status.FAIL,
+            Status.FAIL,
+        ],
+        reference=reference_filepath,
         description=(
             "Review the avg. and max. projections to ensure that the "
             "FOV quality is sufficient."
         ),
-        status_history=[pending_qc_status()],
-        reference=reference_filepath,
-        value=DropdownMetric(
-            value="Quality is sufficient",
-            options=[
-                "Quality is sufficient",
-                "Timeseries shuffled between planes",
-                "Field of view associated with incorrect area and/or depth",
-                "Paired plane cross talk: Extreme",
-                "Paired plane cross-talk: Moderate",
-            ],
-            status=[
-                Status.PASS,
-                Status.FAIL,
-                Status.FAIL,
-                Status.FAIL,
-                Status.FAIL,
-            ],
-        ),
+        value="Quality is sufficient",
     )
 
 
 def build_quality_control(metrics: List[QCMetric]) -> QualityControl:
     """Wrap metrics into a full QualityControl with the standard grouping."""
-    return QualityControl(
-        metrics=list(metrics),
-        default_grouping=DEFAULT_GROUPING,
-    )
+    return shared_qc.build_quality_control(metrics)
 
 
 def write_quality_control_json(
@@ -154,8 +127,4 @@ def write_quality_control_json(
     Path
         The path written.
     """
-    output_dir = Path(output_dir)
-    out_path = output_dir / "quality_control.json"
-    with open(out_path, "w") as f:
-        json.dump(json.loads(quality_control.model_dump_json()), f, indent=4)
-    return out_path
+    return shared_qc.write_quality_control_json(quality_control, output_dir)

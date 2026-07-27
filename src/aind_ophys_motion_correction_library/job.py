@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import suite2p
 from aind_ophys_utils.video_utils import encode_video
+from aind_pophys_metadata import io
 from log_schema.main import setup_logging
 from PIL import Image
 
@@ -53,8 +54,8 @@ def _load_raw_metadata(input_dir: Path) -> dict:
     ``session.json`` structure directly; returns an empty dict for v2-only
     inputs (no session.json present).
     """
-    session_fp = mu._find(input_dir, "session.json")
-    return mu._load_json(session_fp) if session_fp else {}
+    session_fp = io.find(input_dir, "session.json")
+    return io.load_json(session_fp) if session_fp else {}
 
 
 def _prepare_input(
