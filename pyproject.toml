@@ -20,7 +20,7 @@ dependencies = [
     "aind-data-schema==2.8.1",
     "aind-data-schema-models==5.7.3",
     "aind-qcportal-schema>=0.6.4",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@71fefa691bcc6034efbfb2985d5b6059a9e70f0f",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@ad94805247b21a55c8e4bc03eda3f9650b41240d",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     "aind-ophys-utils",
     "torch",

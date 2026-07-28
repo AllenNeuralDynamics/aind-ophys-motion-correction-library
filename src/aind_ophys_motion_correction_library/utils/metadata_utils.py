@@ -97,6 +97,7 @@ def build_data_process(
     input_data: Optional[List[str]] = None,
     output_path: Optional[str] = None,
     output_parameters: Optional[dict] = None,
+    error: Optional[BaseException] = None,
 ) -> DataProcess:
     """Construct a v2 DataProcess for motion correction.
 
@@ -109,17 +110,26 @@ def build_data_process(
     end_time : dt
         Processing end time.
     input_data : list of str, optional
-        Input data asset name(s) for provenance.
+        Input data path(s)/asset name(s) for provenance.
     output_path : str, optional
-        Relative path to the output directory for this process.
+        Path to this process's output directory, relative to the results
+        root.
     output_parameters : dict, optional
         Actual parameters used and output metrics.
+    error : Exception, optional
+        The exception that terminated the run, or ``None`` on success. The
+        message is recorded in ``notes``.
 
     Returns
     -------
     DataProcess
         The populated motion-correction data process.
     """
+    notes = (
+        None
+        if error is None
+        else f"Run failed with {type(error).__name__}: {error}"
+    )
     code = shared_processing.build_code(
         url=CODE_URL,
         name="aind-ophys-motion-correction",
@@ -135,6 +145,8 @@ def build_data_process(
         name="Suite2P motion correction",
         output_path=output_path,
         output_parameters=output_parameters,
+        notes=notes,
+        resources=shared_processing.resource_usage(),
     )
 
 

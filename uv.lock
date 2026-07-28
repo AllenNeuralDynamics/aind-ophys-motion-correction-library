@@ -63,6 +63,7 @@ dependencies = [
     { name = "aind-data-schema" },
     { name = "aind-data-schema-models" },
     { name = "aind-ophys-utils" },
+    { name = "aind-pophys-metadata" },
     { name = "aind-qcportal-schema" },
     { name = "h5py" },
     { name = "log-schema", extra = ["cloudwatch"] },
@@ -104,6 +105,7 @@ requires-dist = [
     { name = "aind-data-schema", specifier = "==2.8.1" },
     { name = "aind-data-schema-models", specifier = "==5.7.3" },
     { name = "aind-ophys-utils" },
+    { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=ad94805247b21a55c8e4bc03eda3f9650b41240d" },
     { name = "aind-qcportal-schema", specifier = ">=0.6.4" },
     { name = "h5py" },
     { name = "log-schema", extras = ["cloudwatch"], git = "https://github.com/AllenNeuralDynamics/aind-log-utils.git?subdirectory=python&rev=f09685e" },
@@ -158,6 +160,17 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4c/0f/2506a7bf698ff4b0c6536fe84ec248362e824f5bbdef4697e13623f41e44/aind_ophys_utils-0.2.0.tar.gz", hash = "sha256:d6f46d0b589ac737014ff90abaf5629eb2ec220cae1a3122c5fe8a023a449105", size = 75303, upload-time = "2026-07-08T22:22:35.646Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7f/11/1b3e924ce7c8d1f10e2eda1d3114c43e1a16369d36717d9babf4e0fdb955/aind_ophys_utils-0.2.0-py3-none-any.whl", hash = "sha256:1c2873760484da9c0a4a90395330d426ae80f180490149b6f21b53c8ba0e5e61", size = 34433, upload-time = "2026-07-08T22:22:34.597Z" },
+]
+
+[[package]]
+name = "aind-pophys-metadata"
+version = "0.1.0"
+source = { git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=ad94805247b21a55c8e4bc03eda3f9650b41240d#ad94805247b21a55c8e4bc03eda3f9650b41240d" }
+dependencies = [
+    { name = "aind-data-schema" },
+    { name = "aind-data-schema-models" },
+    { name = "aind-qcportal-schema" },
+    { name = "pytz" },
 ]
 
 [[package]]

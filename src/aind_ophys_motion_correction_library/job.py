@@ -420,30 +420,29 @@ def _write_reg_metrics(suite2p_args: dict, args: dict, reg_out: dict) -> None:
             reg.flow_png(Path(mc_out), str(p.parent / p.stem), iPC)
 
 
-def _write_metadata_outputs(
-    settings: MotionCorrectionSettings,
-    metadata: mu.MotionCorrectionMetadata,
-    ctx: dict,
-    args: dict,
-    start_time: dt,
-) -> None:
-    """Write full processing.json and quality_control.json documents."""
-    args_for_code = copy.deepcopy(args)
-    args_for_code.pop("refImg", None)
-    output_dir = Path(ctx["output_dir"])
-    data_process = mu.build_data_process(
-        parameters=args_for_code,
-        start_time=start_time,
-        end_time=dt.now(),
-        input_data=[metadata.dataset_name] if metadata.dataset_name else None,
-        output_path=str(output_dir),
-    )
-    mu.write_processing_json(mu.build_processing([data_process]), output_dir)
+def _relative_to_results(results_root: Path, path: Path) -> str:
+    """Return ``path`` relative to the results root.
 
-    p = Path(args["registration_summary_output"])
-    summary_ref = str(p.relative_to(settings.output_dir))
-    combined_ref = str(
-        Path(args["max_projection_output"]).relative_to(settings.output_dir)
+    Falls back to the absolute path when ``path`` is not under the results
+    root, so provenance is never dropped entirely.
+    """
+    try:
+        return str(Path(path).relative_to(results_root))
+    except ValueError:
+        return str(path)
+
+
+def _write_quality_control(
+    settings: MotionCorrectionSettings, ctx: dict, args: dict
+) -> None:
+    """Write one full quality_control.json for this plane."""
+    results_root = Path(settings.output_dir)
+    output_dir = Path(ctx["output_dir"])
+    summary_ref = _relative_to_results(
+        results_root, Path(args["registration_summary_output"])
+    )
+    combined_ref = _relative_to_results(
+        results_root, Path(args["max_projection_output"])
     )
     metrics = [
         qc.build_registration_summary_metric(ctx["unique_id"], summary_ref),
@@ -452,6 +451,40 @@ def _write_metadata_outputs(
     qc.write_quality_control_json(
         qc.build_quality_control(metrics), output_dir
     )
+
+
+def _write_processing_metadata(
+    settings: MotionCorrectionSettings,
+    ctx: dict,
+    start_time: dt,
+    error: Optional[BaseException],
+) -> None:
+    """Best-effort writer for processing.json. Never raises.
+
+    Failures here must not mask a registration failure already propagating
+    out of ``run()``. Falls back to the results root when the run failed
+    before the per-plane output directory was resolved.
+    """
+    results_root = Path(settings.output_dir).resolve()
+    output_dir = Path(ctx.get("output_dir") or results_root)
+    try:
+        args_for_code = copy.deepcopy(ctx.get("args") or {})
+        args_for_code.pop("refImg", None)
+        data_process = mu.build_data_process(
+            parameters=args_for_code,
+            start_time=start_time,
+            end_time=dt.now(),
+            input_data=ctx.get("input_data"),
+            output_path=_relative_to_results(results_root, output_dir),
+            error=error,
+        )
+        mu.write_processing_json(
+            mu.build_processing([data_process]), output_dir
+        )
+    except Exception as proc_exc:
+        logger.error(
+            f"processing.json write failed (non-fatal): {proc_exc}"
+        )
 
 
 def _verify_outputs(output_dir: Path) -> None:
@@ -467,8 +500,83 @@ def _verify_outputs(output_dir: Path) -> None:
     )
 
 
+def _run_motion_correction(
+    settings: MotionCorrectionSettings,
+    metadata: mu.MotionCorrectionMetadata,
+    ctx: dict,
+) -> None:
+    """Register the movie and write every output except processing.json.
+
+    ``ctx`` is populated as the run progresses so the ``processing.json``
+    writer in ``run()``'s ``finally`` can report partial provenance even
+    when this raises.
+    """
+    session = _load_raw_metadata(settings.input_dir)
+    ctx.update(
+        _prepare_input(settings, metadata, session, metadata.frame_rate)
+    )
+    if ctx["frame_rate_hz"] is None:
+        ctx["frame_rate_hz"] = settings.frame_rate
+        logger.warning(
+            "Using CLI fallback frame rate: %s", settings.frame_rate
+        )
+    if ctx["frame_rate_hz"] is None:
+        raise ValueError(
+            "frame_rate could not be resolved from metadata or --frame_rate"
+        )
+    ctx["input_data"] = [
+        _relative_to_results(
+            Path(settings.input_dir).resolve(), Path(ctx["input_file"])
+        )
+    ]
+
+    args = settings.model_dump()
+    args["input_dir"] = str(settings.input_dir)
+    args["output_dir"] = str(settings.output_dir)
+    args["tmp_dir"] = str(settings.tmp_dir)
+    args["frame_rate_hz"] = ctx["frame_rate_hz"]
+    args["refImg"] = (
+        [ctx["reference_image_fp"]] if ctx["reference_image_fp"] else []
+    )
+    ctx["args"] = args
+
+    basename = (
+        ctx["unique_id"]
+        if settings.data_type.lower() in ("tif", "bruker")
+        else Path(ctx["input_file"]).name
+    )
+    _build_output_paths(args, ctx["output_dir"], basename)
+
+    suite2p_args = _build_suite2p_args(settings, ctx, args)
+    _stage_and_trim(settings, suite2p_args, args)
+    suite2p_args, args = _resolve_reference(
+        settings, suite2p_args, args, ctx["reference_image_fp"]
+    )
+    ctx["args"] = args
+
+    tmp_dir = tempfile.TemporaryDirectory(dir=settings.tmp_dir)
+    suite2p_args["save_path0"] = tmp_dir.name
+    suite2p.run_s2p(suite2p_args)
+
+    reg_out = _load_ops_and_clip(suite2p_args, args, tmp_dir.name)
+    _write_registered_h5(suite2p_args, args, reg_out)
+    _write_motion_csv(suite2p_args, args, reg_out)
+    _write_projections_and_previews(suite2p_args, args, reg_out)
+    _write_reg_metrics(suite2p_args, args, reg_out)
+    _write_quality_control(settings, ctx, args)
+
+    try:
+        tmp_dir.cleanup()
+    except Exception:
+        shutil.rmtree(tmp_dir.name, ignore_errors=True)
+
+
 def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
     """Run Suite2P motion correction end to end.
+
+    ``processing.json`` is written from a ``finally`` block so a failed run
+    still leaves a document describing what was attempted, with the error
+    recorded in ``notes``.
 
     Parameters
     ----------
@@ -487,58 +595,27 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
             "process_name": PROCESS_NAME,
         },
     )
-    logger.info("stage_start: motion correction")
-    session = _load_raw_metadata(settings.input_dir)
-
-    ctx = _prepare_input(settings, metadata, session, metadata.frame_rate)
-    if ctx["frame_rate_hz"] is None:
-        ctx["frame_rate_hz"] = settings.frame_rate
-        logger.warning(
-            "Using CLI fallback frame rate: %s", settings.frame_rate
-        )
-    if ctx["frame_rate_hz"] is None:
-        raise ValueError(
-            "frame_rate could not be resolved from metadata or --frame_rate"
-        )
-
-    args = settings.model_dump()
-    args["input_dir"] = str(settings.input_dir)
-    args["output_dir"] = str(settings.output_dir)
-    args["tmp_dir"] = str(settings.tmp_dir)
-    args["frame_rate_hz"] = ctx["frame_rate_hz"]
-    args["refImg"] = (
-        [ctx["reference_image_fp"]] if ctx["reference_image_fp"] else []
+    logger.info(
+        "Starting motion correction", extra={"event_type": "stage_start"}
     )
 
-    basename = (
-        ctx["unique_id"]
-        if settings.data_type.lower() in ("tif", "bruker")
-        else Path(ctx["input_file"]).name
-    )
-    _build_output_paths(args, ctx["output_dir"], basename)
-
-    suite2p_args = _build_suite2p_args(settings, ctx, args)
-    _stage_and_trim(settings, suite2p_args, args)
-    suite2p_args, args = _resolve_reference(
-        settings, suite2p_args, args, ctx["reference_image_fp"]
-    )
-
-    tmp_dir = tempfile.TemporaryDirectory(dir=settings.tmp_dir)
-    suite2p_args["save_path0"] = tmp_dir.name
-    suite2p.run_s2p(suite2p_args)
-
-    reg_out = _load_ops_and_clip(suite2p_args, args, tmp_dir.name)
-    _write_registered_h5(suite2p_args, args, reg_out)
-    _write_motion_csv(suite2p_args, args, reg_out)
-    _write_projections_and_previews(suite2p_args, args, reg_out)
-    _write_reg_metrics(suite2p_args, args, reg_out)
-    _write_metadata_outputs(settings, metadata, ctx, args, start_time)
-
+    ctx: dict = {}
+    run_error: Optional[BaseException] = None
     try:
-        tmp_dir.cleanup()
-    except Exception:
-        shutil.rmtree(tmp_dir.name, ignore_errors=True)
+        _run_motion_correction(settings, metadata, ctx)
+        logger.info(
+            "Motion correction complete",
+            extra={"event_type": "stage_complete"},
+        )
+    except BaseException as exc:
+        run_error = exc
+        logger.error(
+            "Motion correction failed", extra={"event_type": "stage_error"}
+        )
+        logger.exception("Unhandled exception")
+        raise
+    finally:
+        _write_processing_metadata(settings, ctx, start_time, run_error)
 
     if settings.verify:
         _verify_outputs(ctx["output_dir"])
-    logger.info("stage_complete: motion correction")

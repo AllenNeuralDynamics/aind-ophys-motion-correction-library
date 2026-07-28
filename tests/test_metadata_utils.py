@@ -7,15 +7,23 @@ builders.
 """
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from aind_data_schema.core.processing import Processing
-from aind_pophys_metadata import io
+from aind_pophys_metadata import io, processing as shared_processing
 
 from aind_ophys_motion_correction_library.utils import metadata_utils as mu
+
+_PIPELINE_ENV = {
+    shared_processing.PIPELINE_NAME_ENV: "aind-pophys-pipeline",
+    shared_processing.PIPELINE_VERSION_ENV: "2.0.0",
+    shared_processing.PIPELINE_URL_ENV: "https://example.com/pipeline",
+}
 
 
 def _write(directory: Path, name: str, payload: dict) -> None:
@@ -140,6 +148,51 @@ class TestProcessingBuilders(unittest.TestCase):
         now = datetime.now(timezone.utc)
         dp = mu.build_data_process({}, now, now)
         self.assertIsNone(dp.code.input_data)
+
+    def test_resources_recorded(self):
+        """Host resource usage is recorded on the process."""
+        now = datetime.now(timezone.utc)
+        dp = mu.build_data_process({}, now, now)
+        self.assertIsNotNone(dp.resources)
+
+    def test_experimenters_defaults_empty(self):
+        """experimenters is an empty list of people, never an institution."""
+        now = datetime.now(timezone.utc)
+        dp = mu.build_data_process({}, now, now)
+        self.assertEqual(dp.experimenters, [])
+
+    def test_error_recorded_in_notes(self):
+        """A run error is summarized in DataProcess.notes."""
+        now = datetime.now(timezone.utc)
+        dp = mu.build_data_process(
+            {}, now, now, error=RuntimeError("suite2p blew up")
+        )
+        self.assertIn("RuntimeError", dp.notes)
+        self.assertIn("suite2p blew up", dp.notes)
+
+    def test_notes_none_on_success(self):
+        """No error -> no notes."""
+        now = datetime.now(timezone.utc)
+        dp = mu.build_data_process({}, now, now)
+        self.assertIsNone(dp.notes)
+
+    @patch.dict(os.environ, _PIPELINE_ENV, clear=True)
+    def test_pipeline_identity_from_env(self):
+        """In a pipeline run, the process links to the pipeline."""
+        now = datetime.now(timezone.utc)
+        dp = mu.build_data_process({}, now, now)
+        doc = mu.build_processing([dp])
+        self.assertEqual(dp.pipeline_name, "aind-pophys-pipeline")
+        self.assertEqual(doc.pipelines[0].name, "aind-pophys-pipeline")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_no_pipeline_identity_standalone(self):
+        """Standalone runs omit pipeline linkage rather than inventing it."""
+        now = datetime.now(timezone.utc)
+        dp = mu.build_data_process({}, now, now)
+        doc = mu.build_processing([dp])
+        self.assertIsNone(dp.pipeline_name)
+        self.assertIsNone(doc.pipelines)
 
 
 if __name__ == "__main__":
