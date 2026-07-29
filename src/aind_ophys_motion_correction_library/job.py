@@ -29,6 +29,7 @@ from . import qc
 from . import registration as reg
 from .settings import MotionCorrectionSettings
 from .utils import metadata_utils as mu
+from .utils.paths import relative_to_root
 
 logger = logging.getLogger("Suite2P motion correction")
 
@@ -420,28 +421,16 @@ def _write_reg_metrics(suite2p_args: dict, args: dict, reg_out: dict) -> None:
             reg.flow_png(Path(mc_out), str(p.parent / p.stem), iPC)
 
 
-def _relative_to_results(results_root: Path, path: Path) -> str:
-    """Return ``path`` relative to the results root.
-
-    Falls back to the absolute path when ``path`` is not under the results
-    root, so provenance is never dropped entirely.
-    """
-    try:
-        return str(Path(path).relative_to(results_root))
-    except ValueError:
-        return str(path)
-
-
 def _write_quality_control(
     settings: MotionCorrectionSettings, ctx: dict, args: dict
 ) -> None:
     """Write one full quality_control.json for this plane."""
     results_root = Path(settings.output_dir)
     output_dir = Path(ctx["output_dir"])
-    summary_ref = _relative_to_results(
+    summary_ref = relative_to_root(
         results_root, Path(args["registration_summary_output"])
     )
-    combined_ref = _relative_to_results(
+    combined_ref = relative_to_root(
         results_root, Path(args["max_projection_output"])
     )
     metrics = [
@@ -475,7 +464,7 @@ def _write_processing_metadata(
             start_time=start_time,
             end_time=dt.now(),
             input_data=ctx.get("input_data"),
-            output_path=_relative_to_results(results_root, output_dir),
+            output_path=relative_to_root(results_root, output_dir),
             error=error,
         )
         mu.write_processing_json(
@@ -525,7 +514,7 @@ def _run_motion_correction(
             "frame_rate could not be resolved from metadata or --frame_rate"
         )
     ctx["input_data"] = [
-        _relative_to_results(
+        relative_to_root(
             Path(settings.input_dir).resolve(), Path(ctx["input_file"])
         )
     ]
