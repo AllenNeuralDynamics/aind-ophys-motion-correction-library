@@ -29,6 +29,23 @@ class TestQCMetrics(unittest.TestCase):
         """The default status history entry is PENDING."""
         self.assertEqual(qc.pending_qc_status().status, Status.PENDING)
 
+    def test_dropdowns_ship_empty_so_review_is_requested(self):
+        """Both dropdowns leave the value unset.
+
+        qcportal treats "" as pending; a preselected option renders as
+        already answered, so a reviewer skips it. In both of these the
+        passing option is index 0, so a preset value auto-passed the very
+        review the metric exists to request.
+        """
+        for m in (
+            qc.build_registration_summary_metric("plane_0", "a.png"),
+            qc.build_fov_quality_metric("plane_0", "b.png"),
+        ):
+            self.assertEqual(m.value.value, "")
+            self.assertEqual(
+                m.status_history[0].status, Status.PENDING
+            )
+
 
 class TestQualityControlCollector(unittest.TestCase):
     """build_quality_control + write round-trip."""

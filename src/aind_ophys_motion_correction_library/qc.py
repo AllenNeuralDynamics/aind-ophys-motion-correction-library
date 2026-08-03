@@ -100,7 +100,6 @@ def build_fov_quality_metric(
             "Review the avg. and max. projections to ensure that the "
             "FOV quality is sufficient."
         ),
-        value="Quality is sufficient",
     )
 
 

@@ -465,6 +465,7 @@ def _write_processing_metadata(
             end_time=dt.now(),
             input_data=ctx.get("input_data"),
             output_path=relative_to_root(results_root, output_dir),
+            plane_id=ctx.get("unique_id"),
             error=error,
         )
         mu.write_processing_json(
