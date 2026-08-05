@@ -100,6 +100,10 @@ def _prepare_input(
                     data_dir, output_dir, debug=settings.debug
                 )
             )
+            # multiplane_motion_correction names output_dir after the real
+            # per-plane id; dataset_name is session-level and collides
+            # across every plane's task.
+            unique_id = output_dir.parent.name
         input_file = str(h5_file)
     else:
         raise ValueError(
