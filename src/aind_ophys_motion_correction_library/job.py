@@ -1,9 +1,9 @@
 """Top-level motion-correction orchestration.
 
 ``run()`` is the library entry point called by the thin capsule wrapper:
-read metadata (v1 or v2) -> configure logging -> prepare per-plane input ->
-run Suite2P -> write the registered movie + diagnostics -> emit a full
-``processing.json`` and ``quality_control.json``.
+read metadata (v1 or v2) -> configure logging -> resolve this task's plane
+identity -> run Suite2P -> write the registered movie + diagnostics -> emit a
+full ``processing.json`` and ``quality_control.json``.
 """
 
 import copy
@@ -11,7 +11,6 @@ import json
 import logging
 import shutil
 import tempfile
-from datetime import datetime as dt
 from functools import partial
 from pathlib import Path
 from typing import Optional
@@ -20,8 +19,12 @@ import h5py
 import numpy as np
 import pandas as pd
 import suite2p
+from aind_data_schema_models.process_names import ProcessName
 from aind_ophys_utils.video_utils import encode_video
 from aind_pophys_metadata import io
+from aind_pophys_metadata.paths import find_one, relative_to_root
+from aind_pophys_metadata.processing import collect_upstream_process_names
+from aind_pophys_metadata.runner import stage_guard
 from log_schema.main import setup_logging
 from PIL import Image
 
@@ -29,11 +32,11 @@ from . import qc
 from . import registration as reg
 from .settings import MotionCorrectionSettings
 from .utils import metadata_utils as mu
-from .utils.paths import relative_to_root
 
 logger = logging.getLogger("Suite2P motion correction")
 
 PROCESS_NAME = "aind-ophys-motion-correction"
+DATA_PROCESS_NAME = "Suite2P motion correction"
 _BERGAMO_INSTRUMENT = "Bergamo"
 
 # Output filename suffixes appended to the plane basename.
@@ -48,76 +51,140 @@ _OUTPUT_SUFFIXES = (
 )
 
 
-def _load_raw_metadata(input_dir: Path) -> dict:
-    """Load the raw v1 session dict for the per-plane prep functions.
+def _is_bergamo(metadata: mu.MotionCorrectionMetadata) -> bool:
+    """Return whether this acquisition came off a Bergamo rig.
 
-    The multiplane/single-plane preparation helpers still consume the v1
-    ``session.json`` structure directly; returns an empty dict for v2-only
-    inputs (no session.json present).
+    Parameters
+    ----------
+    metadata : mu.MotionCorrectionMetadata
+        The acquisition metadata view.
+
+    Returns
+    -------
+    bool
+        True for a Bergamo single-plane acquisition.
     """
-    session_fp = io.find(input_dir, "session.json")
-    return io.load_json(session_fp) if session_fp else {}
+    return _BERGAMO_INSTRUMENT in (metadata.instrument_id or "")
 
 
-def _prepare_input(
+def _resolve_plane_input(
     settings: MotionCorrectionSettings,
     metadata: mu.MotionCorrectionMetadata,
-    session: dict,
-    frame_rate_hz: Optional[float],
+    common: io.CommonMetadata,
 ) -> dict:
-    """Route by data_type to locate the per-plane input to register.
+    """Locate this task's movie and resolve its canonical plane identity.
 
-    Returns a context dict with input_file, unique_id, output_dir,
-    frame_rate_hz, and reference_image_fp.
+    Runs before the metadata guard, which needs the per-plane output
+    directory and plane id up front. Only discovery happens here; anything
+    that reads or writes movie data belongs in :func:`_prepare_movie`.
+
+    Parameters
+    ----------
+    settings : MotionCorrectionSettings
+        Parsed settings.
+    metadata : mu.MotionCorrectionMetadata
+        The acquisition metadata view.
+    common : aind_pophys_metadata.io.CommonMetadata
+        Core and sibling metadata documents.
+
+    Returns
+    -------
+    dict
+        Context with ``input_file``, ``unique_id``, ``output_dir``,
+        ``frame_rate_hz`` and ``reference_image_fp``.
+
+    Raises
+    ------
+    ValueError
+        If the data type is unsupported, or no source supplies a frame rate.
     """
     data_dir = settings.input_dir
-    output_dir = settings.output_dir
+    results_root = settings.output_dir
     data_type = settings.data_type.lower()
-    reference_image_fp = ""
+    frame_rate_hz = metadata.frame_rate
 
     if data_type in ("tif", "bruker"):
-        unique_id = "plane_0"
-        try:
-            input_file = next(data_dir.rglob("*/pophys"))
-        except StopIteration:
-            input_file = next(data_dir.rglob("pophys"))
-        output_dir = reg.make_output_directory(output_dir, unique_id)
+        unique_id = mu.resolve_plane_id(metadata.fov_ids)
+        input_file = find_one(
+            data_dir, "*/pophys", required=False
+        ) or find_one(data_dir, "pophys")
+        output_dir = reg.make_output_directory(results_root, unique_id)
+    elif data_type == "h5" and _is_bergamo(metadata):
+        # The movie is named after the session, so the selector that finds
+        # it and the plane id that names the outputs are different values.
+        selector = metadata.dataset_name or mu.DEFAULT_PLANE_ID
+        unique_id = mu.resolve_plane_id(metadata.fov_ids, fallback=selector)
+        input_file, output_dir = reg.find_singleplane_input(
+            data_dir, results_root, unique_id, selector
+        )
     elif data_type == "h5":
-        unique_id = metadata.dataset_name or "plane_0"
-        if _BERGAMO_INSTRUMENT in (metadata.instrument_id or ""):
-            h5_file, output_dir, reference_image_fp = (
-                reg.singleplane_motion_correction(
-                    data_dir,
-                    output_dir,
-                    session,
-                    unique_id,
-                    debug=settings.debug,
-                )
-            )
-        else:
-            h5_file, output_dir, frame_rate_hz = (
-                reg.multiplane_motion_correction(
-                    data_dir, output_dir, debug=settings.debug
-                )
-            )
-            # multiplane_motion_correction names output_dir after the real
-            # per-plane id; dataset_name is session-level and collides
-            # across every plane's task.
-            unique_id = output_dir.parent.name
-        input_file = str(h5_file)
+        input_file, scavenged_id = reg.find_multiplane_input(data_dir)
+        unique_id = mu.resolve_plane_id(
+            metadata.fov_ids, scavenged=scavenged_id
+        )
+        output_dir = reg.make_output_directory(results_root, unique_id)
+        frame_rate_hz = reg.resolve_multiplane_frame_rate(
+            data_dir, common, settings.frame_rate
+        )
     else:
         raise ValueError(
             f"Data type {settings.data_type} not supported. "
             "Please use 'tif', 'bruker', or 'h5'."
         )
 
+    if frame_rate_hz is None:
+        raise ValueError(
+            "No frame rate could be resolved from "
+            f"{Path(common.core_path).name}, {io.PLATFORM_FILE} or "
+            "--frame_rate."
+        )
     return {
         "input_file": input_file,
         "unique_id": unique_id,
         "output_dir": output_dir,
         "frame_rate_hz": frame_rate_hz,
-        "reference_image_fp": reference_image_fp,
+        "reference_image_fp": "",
     }
+
+
+def _prepare_movie(
+    settings: MotionCorrectionSettings,
+    metadata: mu.MotionCorrectionMetadata,
+    common: io.CommonMetadata,
+    ctx: dict,
+) -> None:
+    """Build the reference movie and apply any debug truncation, in place.
+
+    Parameters
+    ----------
+    settings : MotionCorrectionSettings
+        Parsed settings.
+    metadata : mu.MotionCorrectionMetadata
+        The acquisition metadata view.
+    common : aind_pophys_metadata.io.CommonMetadata
+        Core and sibling metadata documents.
+    ctx : dict
+        Context from :func:`_resolve_plane_input`; ``input_file`` and
+        ``reference_image_fp`` are updated.
+    """
+    if settings.data_type.lower() != "h5":
+        return
+    if _is_bergamo(metadata):
+        input_file, _, reference_image_fp = reg.singleplane_motion_correction(
+            Path(ctx["input_file"]),
+            ctx["output_dir"],
+            common.core_raw,
+            common.version,
+            debug=settings.debug,
+        )
+        ctx["input_file"] = input_file
+        ctx["reference_image_fp"] = reference_image_fp
+    elif settings.debug:
+        ctx["input_file"] = reg.truncate_for_debug(
+            Path(ctx["input_file"]),
+            ctx["unique_id"],
+            ctx["frame_rate_hz"],
+        )
 
 
 def _build_output_paths(args: dict, output_dir: Path, basename: str) -> None:
@@ -225,8 +292,8 @@ def _load_ops_and_clip(suite2p_args: dict, args: dict, tdir: str) -> dict:
 
     Returns a dict with data, ops, delta_x/y, clipped_indices, is_valid.
     """
-    bin_path = list(Path(tdir).rglob("data.bin"))[0]
-    ops_path = list(Path(tdir).rglob("ops.npy"))[0]
+    bin_path = find_one(tdir, "data.bin")
+    ops_path = find_one(tdir, "ops.npy")
     ops = np.load(ops_path, allow_pickle=True).item()
 
     detrend_size = int(args["frame_rate_hz"] * args["outlier_detrend_window"])
@@ -446,39 +513,45 @@ def _write_quality_control(
     )
 
 
-def _write_processing_metadata(
-    settings: MotionCorrectionSettings,
-    ctx: dict,
-    start_time: dt,
-    error: Optional[BaseException],
-) -> None:
-    """Best-effort writer for processing.json. Never raises.
+def _registration_output_parameters(args: dict, reg_out: dict) -> dict:
+    """Scalar summary statistics describing the registered movie.
 
-    Failures here must not mask a registration failure already propagating
-    out of ``run()``. Falls back to the results root when the run failed
-    before the per-plane output directory was resolved.
+    ``output_parameters`` carries statistics about a step's *outputs*, chosen
+    so a reviewer can triage the registration from the metadata alone without
+    opening the movie. Input configuration belongs in ``code.parameters`` and
+    is deliberately not repeated here.
+
+    Parameters
+    ----------
+    args : dict
+        Resolved run arguments, read for the trim counts actually applied.
+    reg_out : dict
+        Registration result from :func:`_load_ops_and_clip`.
+
+    Returns
+    -------
+    dict
+        The summary statistics.
     """
-    results_root = Path(settings.output_dir).resolve()
-    output_dir = Path(ctx.get("output_dir") or results_root)
-    try:
-        args_for_code = copy.deepcopy(ctx.get("args") or {})
-        args_for_code.pop("refImg", None)
-        data_process = mu.build_data_process(
-            parameters=args_for_code,
-            start_time=start_time,
-            end_time=dt.now(),
-            input_data=ctx.get("input_data"),
-            output_path=relative_to_root(results_root, output_dir),
-            plane_id=ctx.get("unique_id"),
-            error=error,
+    delta_x = np.abs(np.asarray(reg_out["delta_x"], dtype=float))
+    delta_y = np.abs(np.asarray(reg_out["delta_y"], dtype=float))
+    summary = {
+        "frame_count": int(len(reg_out["data"])),
+        "valid_frame_count": int(np.count_nonzero(reg_out["is_valid"])),
+        "frames_trimmed_start": int(args["trim_frames_start"]),
+        "frames_trimmed_end": int(args["trim_frames_end"]),
+        "outlier_frames_clipped": int(len(reg_out["clipped_indices"])),
+    }
+    if delta_x.size and delta_y.size:
+        summary.update(
+            {
+                "max_abs_shift_x_pixels": float(delta_x.max()),
+                "max_abs_shift_y_pixels": float(delta_y.max()),
+                "mean_abs_shift_x_pixels": float(delta_x.mean()),
+                "mean_abs_shift_y_pixels": float(delta_y.mean()),
+            }
         )
-        mu.write_processing_json(
-            mu.build_processing([data_process]), output_dir
-        )
-    except Exception as proc_exc:
-        logger.error(
-            f"processing.json write failed (non-fatal): {proc_exc}"
-        )
+    return summary
 
 
 def _verify_outputs(output_dir: Path) -> None:
@@ -494,59 +567,71 @@ def _verify_outputs(output_dir: Path) -> None:
     )
 
 
-def _run_motion_correction(
-    settings: MotionCorrectionSettings,
-    metadata: mu.MotionCorrectionMetadata,
-    ctx: dict,
-) -> None:
-    """Register the movie and write every output except processing.json.
+def _build_args(settings: MotionCorrectionSettings, ctx: dict) -> dict:
+    """Assemble the resolved run arguments recorded as code parameters.
 
-    ``ctx`` is populated as the run progresses so the ``processing.json``
-    writer in ``run()``'s ``finally`` can report partial provenance even
-    when this raises.
+    Parameters
+    ----------
+    settings : MotionCorrectionSettings
+        Parsed settings.
+    ctx : dict
+        Context from :func:`_resolve_plane_input`.
+
+    Returns
+    -------
+    dict
+        The run arguments, including the per-output file paths.
     """
-    session = _load_raw_metadata(settings.input_dir)
-    ctx.update(
-        _prepare_input(settings, metadata, session, metadata.frame_rate)
-    )
-    if ctx["frame_rate_hz"] is None:
-        ctx["frame_rate_hz"] = settings.frame_rate
-        logger.warning(
-            "Using CLI fallback frame rate: %s", settings.frame_rate
-        )
-    if ctx["frame_rate_hz"] is None:
-        raise ValueError(
-            "frame_rate could not be resolved from metadata or --frame_rate"
-        )
-    ctx["input_data"] = [
-        relative_to_root(
-            Path(settings.input_dir).resolve(), Path(ctx["input_file"])
-        )
-    ]
-
     args = settings.model_dump()
     args["input_dir"] = str(settings.input_dir)
     args["output_dir"] = str(settings.output_dir)
     args["tmp_dir"] = str(settings.tmp_dir)
     args["frame_rate_hz"] = ctx["frame_rate_hz"]
-    args["refImg"] = (
-        [ctx["reference_image_fp"]] if ctx["reference_image_fp"] else []
-    )
-    ctx["args"] = args
-
+    args["refImg"] = []
     basename = (
         ctx["unique_id"]
         if settings.data_type.lower() in ("tif", "bruker")
         else Path(ctx["input_file"]).name
     )
     _build_output_paths(args, ctx["output_dir"], basename)
+    return args
+
+
+def _run_motion_correction(
+    settings: MotionCorrectionSettings,
+    metadata: mu.MotionCorrectionMetadata,
+    common: io.CommonMetadata,
+    ctx: dict,
+) -> dict:
+    """Register the movie and write every output except processing.json.
+
+    Parameters
+    ----------
+    settings : MotionCorrectionSettings
+        Parsed settings.
+    metadata : mu.MotionCorrectionMetadata
+        The acquisition metadata view.
+    common : aind_pophys_metadata.io.CommonMetadata
+        Core and sibling metadata documents.
+    ctx : dict
+        Context from :func:`_resolve_plane_input`, carrying ``args``.
+
+    Returns
+    -------
+    dict
+        Summary statistics for ``DataProcess.output_parameters``.
+    """
+    _prepare_movie(settings, metadata, common, ctx)
+    args = ctx["args"]
+    args["refImg"] = (
+        [ctx["reference_image_fp"]] if ctx["reference_image_fp"] else []
+    )
 
     suite2p_args = _build_suite2p_args(settings, ctx, args)
     _stage_and_trim(settings, suite2p_args, args)
     suite2p_args, args = _resolve_reference(
         settings, suite2p_args, args, ctx["reference_image_fp"]
     )
-    ctx["args"] = args
 
     tmp_dir = tempfile.TemporaryDirectory(dir=settings.tmp_dir)
     suite2p_args["save_path0"] = tmp_dir.name
@@ -563,14 +648,15 @@ def _run_motion_correction(
         tmp_dir.cleanup()
     except Exception:
         shutil.rmtree(tmp_dir.name, ignore_errors=True)
+    return _registration_output_parameters(args, reg_out)
 
 
 def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
     """Run Suite2P motion correction end to end.
 
-    ``processing.json`` is written from a ``finally`` block so a failed run
-    still leaves a document describing what was attempted, with the error
-    recorded in ``notes``.
+    The registration is wrapped in the shared ``stage_guard``, which stamps
+    the timings, emits the stage markers and writes ``processing.json``
+    whether or not the body raises.
 
     Parameters
     ----------
@@ -580,8 +666,12 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
         through the core v2 schema objects after writing.
     """
     settings = settings or MotionCorrectionSettings()
-    start_time = dt.now()
-    metadata = mu.load_motion_correction_metadata(settings.input_dir)
+    common = io.load_common(settings.input_dir)
+    metadata = mu.load_motion_correction_metadata(
+        settings.input_dir,
+        common=common,
+        cli_override=settings.frame_rate,
+    )
     setup_logging(
         use_cloudwatch=True,
         model={
@@ -589,27 +679,34 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
             "process_name": PROCESS_NAME,
         },
     )
-    logger.info(
-        "Starting motion correction", extra={"event_type": "stage_start"}
-    )
 
-    ctx: dict = {}
-    run_error: Optional[BaseException] = None
-    try:
-        _run_motion_correction(settings, metadata, ctx)
-        logger.info(
-            "Motion correction complete",
-            extra={"event_type": "stage_complete"},
+    ctx = _resolve_plane_input(settings, metadata, common)
+    ctx["args"] = _build_args(settings, ctx)
+    ctx["input_data"] = [
+        relative_to_root(
+            Path(settings.input_dir).resolve(), Path(ctx["input_file"])
         )
-    except BaseException as exc:
-        run_error = exc
-        logger.error(
-            "Motion correction failed", extra={"event_type": "stage_error"}
+    ]
+    code_parameters = copy.deepcopy(ctx["args"])
+    code_parameters.pop("refImg", None)
+
+    results_root = Path(settings.output_dir).resolve()
+    with stage_guard(
+        ctx["output_dir"],
+        ProcessName.VIDEO_MOTION_CORRECTION,
+        mu.build_code(code_parameters, ctx["input_data"]),
+        plane_id=ctx["unique_id"],
+        logger=logger,
+        name=DATA_PROCESS_NAME,
+        output_path=relative_to_root(results_root, ctx["output_dir"]),
+    ) as stage:
+        stage.upstream_names = collect_upstream_process_names(
+            settings.input_dir,
+            exclude=f"{ctx['unique_id']}: {DATA_PROCESS_NAME}",
         )
-        logger.exception("Unhandled exception")
-        raise
-    finally:
-        _write_processing_metadata(settings, ctx, start_time, run_error)
+        stage.output_parameters = _run_motion_correction(
+            settings, metadata, common, ctx
+        )
 
     if settings.verify:
         _verify_outputs(ctx["output_dir"])

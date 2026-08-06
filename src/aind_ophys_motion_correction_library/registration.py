@@ -28,6 +28,8 @@ from aind_ophys_utils.video_utils import (
     downsample_array,
     downsample_h5_video,
 )
+from aind_pophys_metadata import fields, io
+from aind_pophys_metadata.paths import find_one
 from matplotlib import pyplot as plt  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont
 from ScanImageTiffReader import ScanImageTiffReader
@@ -47,10 +49,19 @@ from suite2p.registration.rigid import (
 )
 
 from .sync_dataset import Sync
+from .utils import metadata_utils as mu
 
 mpl.use("Agg")
 
 logger = logging.getLogger(__name__)
+
+# Debug runs register the first six minutes of a multiplane movie, and a
+# fixed frame count of a Bergamo single-plane movie.
+DEBUG_DURATION_S = 360.0
+DEBUG_SINGLEPLANE_FRAMES = 5000
+
+# Writable scratch directory for the debug-truncated and virtual movies.
+SCRATCH_DIR = Path("../scratch")
 
 
 def is_S3(file_path: str):
@@ -1491,74 +1502,169 @@ def get_frame_rate_from_sync(sync_file, platform_data) -> float:
     return frame_rate_hz
 
 
-def multiplane_motion_correction(
-    data_dir: Path, output_dir: Path, debug: bool = False
-):
-    """Process multiplane data for suite2p parameters
+def find_multiplane_input(data_dir: Path) -> Tuple[Path, str]:
+    """Locate this task's plane movie and the id its layout encodes.
+
+    A multiplane task is handed exactly one plane, either named by a sidecar
+    text file or living in a directory named after the plane.
 
     Parameters
     ----------
-    data_dir: Path
-        path to h5 file
-    output_dir: Path
-        output directory
-    debug: bool
-        run in debug mode
+    data_dir : Path
+        Input directory, searched recursively.
+
     Returns
     -------
-    h5_file: Path
-        path to h5 file
-    output_dir: Path
-        output directory
-    frame_rate_hz: float
-        frame rate in Hz
+    tuple of (Path, str)
+        The plane's HDF5 movie and the plane id its filename/directory
+        encodes. The id is only a scavenged candidate; the canonical id
+        comes from the acquisition metadata.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no plane directory or movie can be located.
     """
+    data_dir = Path(data_dir)
     pattern = re.compile(r"^V.*\d+$")
     matching_files = [
         d for d in data_dir.rglob("*.txt") if pattern.match(d.stem)
     ]
-    if len(matching_files) > 0:
+    if matching_files:
         with open(matching_files[0], "r") as f:
-            h5_file = f.read()
-        h5_file = next(data_dir.rglob(h5_file))
-        unique_id = h5_file.stem
+            h5_name = f.read()
+        h5_file = find_one(data_dir, h5_name)
     else:
-        h5_dir = [i for i in data_dir.rglob("*V*") if i.is_dir()][0]
-        unique_id = h5_dir.name
-        h5_file = [i for i in h5_dir.glob(f"{h5_dir.name}.h5")][0]
-    logging.info("Found raw time series to process %s", h5_file)
-    session_fp = next(data_dir.rglob("session.json"), "")
-    if not session_fp:
-        raise f"Could not locate session.json in {session_fp}"
-    with open(session_fp) as f:
-        session_data = json.load(f)
-    output_dir = make_output_directory(output_dir, unique_id)
-    try:
-        frame_rate_hz = float(
-            session_data["data_streams"][0]["ophys_fovs"][0]["frame_rate"]
+        h5_dir = next(
+            (i for i in data_dir.rglob("*V*") if i.is_dir()), None
         )
-    except KeyError:
-        logging.warning(
-            "Frame rate not found in session.json, pulling from platform.json"
+        if h5_dir is None:
+            raise FileNotFoundError(
+                f"No plane directory matching '*V*' found under {data_dir}"
+            )
+        h5_file = find_one(h5_dir, f"{h5_dir.name}.h5", recursive=False)
+    logger.info("Found raw time series to process %s", h5_file)
+    return h5_file, h5_file.stem
+
+
+def resolve_multiplane_frame_rate(
+    data_dir: Path,
+    common: io.CommonMetadata,
+    cli_override: Optional[float] = None,
+) -> float:
+    """Frame rate for a multiplane task, with a sync-file last resort.
+
+    The shared resolver covers the core acquisition file (v1 ``session.json``
+    or v2 ``acquisition.json``), ``platform.json`` and the operator override.
+    Only when all of those are silent is the rate recomputed from the sync
+    file's 2P vsync line.
+
+    Parameters
+    ----------
+    data_dir : Path
+        Input directory, searched recursively for the sync file.
+    common : aind_pophys_metadata.io.CommonMetadata
+        Core and sibling metadata documents for this asset.
+    cli_override : float, optional
+        Operator-supplied frame rate.
+
+    Returns
+    -------
+    float
+        The frame rate in Hz.
+
+    Raises
+    ------
+    ValueError
+        If no source supplies a frame rate.
+    """
+    frame_rate_hz = fields.resolve_frame_rate(
+        common.version,
+        common.core_raw,
+        common.platform_raw,
+        core_file=common.core_path,
+        input_dir=data_dir,
+        cli_override=cli_override,
+        required=False,
+    )
+    if frame_rate_hz is not None:
+        return frame_rate_hz
+    logger.warning(
+        "No frame rate in %s or %s; deriving it from the sync file.",
+        Path(common.core_path).name,
+        io.PLATFORM_FILE,
+    )
+    platform_data = common.platform_raw
+    if platform_data is None:
+        raise ValueError(
+            f"No frame rate in {Path(common.core_path).name} and no "
+            f"{io.PLATFORM_FILE} under {data_dir} to locate a sync file with."
         )
-        platform_json = next(data_dir.rglob("*platform.json"))
-        with open(platform_json, "r") as j:
-            platform_data = json.load(j)
-        sync_file = [i for i in data_dir.rglob("platform_data['sync_file']")][
-            0
-        ]
-        frame_rate_hz = get_frame_rate_from_sync(sync_file, platform_data)
-    if debug:
-        logging.info("Running in debug mode....")
-        raw_data = h5py.File(h5_file, "r")
-        frames_6min = int(360 * float(frame_rate_hz))
-        trimmed_data = raw_data["data"][:frames_6min]
-        raw_data.close()
-        trimmed_fn = Path("../scratch") / f"{unique_id}.h5"
-        with h5py.File(trimmed_fn, "w") as f:
-            f.create_dataset("data", data=trimmed_data)
-        h5_file = trimmed_fn
-    return h5_file, output_dir, frame_rate_hz
+    sync_file = find_one(
+        data_dir, Path(platform_data["sync_file"]).name, required=True
+    )
+    return get_frame_rate_from_sync(sync_file, platform_data)
+
+
+def truncate_for_debug(
+    h5_file: Path,
+    unique_id: str,
+    frame_rate_hz: float,
+    scratch_dir: Path = SCRATCH_DIR,
+) -> Path:
+    """Write a debug-length copy of a plane movie to scratch.
+
+    The requested length is :data:`DEBUG_DURATION_S` seconds, but the
+    converter caps its own debug output well below that, so the slice is
+    frequently a no-op. The effective length is therefore logged rather than
+    the requested one, and a shortfall is called out - an unlogged silent
+    clip is what made a 38x discrepancy between two log lines look like a
+    data defect.
+
+    Parameters
+    ----------
+    h5_file : Path
+        Source movie.
+    unique_id : str
+        Plane id, used to name the scratch copy.
+    frame_rate_hz : float
+        Acquisition frame rate in Hz.
+    scratch_dir : Path, optional
+        Writable directory the copy is written to.
+
+    Returns
+    -------
+    Path
+        Path to the truncated copy.
+    """
+    requested_frames = int(DEBUG_DURATION_S * float(frame_rate_hz))
+    with h5py.File(h5_file, "r") as raw_data:
+        available_frames = raw_data["data"].shape[0]
+        effective_frames = min(requested_frames, available_frames)
+        trimmed_data = raw_data["data"][:effective_frames]
+    if requested_frames > available_frames:
+        logger.warning(
+            "Truncating %s to %d frames (%.0f s at %.3f Hz requested %d "
+            "frames): movie already shorter than the debug target - "
+            "upstream debug cap in effect.",
+            Path(h5_file).name,
+            effective_frames,
+            DEBUG_DURATION_S,
+            float(frame_rate_hz),
+            requested_frames,
+        )
+    else:
+        logger.info(
+            "Truncating %s to %d frames (%.0f s at %.3f Hz).",
+            Path(h5_file).name,
+            effective_frames,
+            DEBUG_DURATION_S,
+            float(frame_rate_hz),
+        )
+    trimmed_fn = Path(scratch_dir) / f"{unique_id}.h5"
+    with h5py.File(trimmed_fn, "w") as f:
+        f.create_dataset("data", data=trimmed_data)
+    return trimmed_fn
 
 
 def update_suite2p_args_reference_image(
@@ -1676,31 +1782,34 @@ def update_suite2p_args_reference_image(
     return suite2p_args, args
 
 
-def generate_single_plane_reference(fp: Path, session) -> Path:
-    """Generate virtual movies for Bergamo data
+def generate_single_plane_reference(
+    fp: Path,
+    core_raw: dict,
+    version: str,
+    scratch_dir: Path = SCRATCH_DIR,
+) -> Path:
+    """Generate the Bergamo reference movie from the conditioning epoch.
 
     Parameters
     ----------
-    fp: Path
-        path to h5 file
-    session: dict
-        session metadata
+    fp : Path
+        Path to the plane's HDF5 movie.
+    core_raw : dict
+        Raw ``session.json`` (v1) or ``acquisition.json`` (v2) dict.
+    version : str
+        Schema version string.
+    scratch_dir : Path, optional
+        Writable directory the virtual dataset is written to.
+
     Returns
     -------
     Path
-        path to reference image
+        Path to the reference movie.
     """
+    reference_fp = Path(scratch_dir) / "reference_image.h5"
     with h5py.File(fp, "r") as f:
-        # take the first bci epoch to save out reference image TODO
         tiff_stems = json.loads(f["epoch_locations"][:][0])
-        bci_epochs = [
-            i
-            for i in session["stimulus_epochs"]
-            if i["stimulus_name"] == "single neuron BCI conditioning"
-        ]
-        bci_epoch_loc = [
-            i["output_parameters"]["tiff_stem"] for i in bci_epochs
-        ][0]
+        bci_epoch_loc = mu.bci_epoch_tiff_stem(core_raw, version)
         frame_length = (
             tiff_stems[bci_epoch_loc][1] - tiff_stems[bci_epoch_loc][0]
         )
@@ -1712,53 +1821,110 @@ def generate_single_plane_reference(fp: Path, session) -> Path:
             tiff_stems[bci_epoch_loc][0] : tiff_stems[bci_epoch_loc][1]
         ]
 
-        with h5py.File("../scratch/reference_image.h5", "w") as ref:
-
+        with h5py.File(reference_fp, "w") as ref:
             ref.create_virtual_dataset("data", layout)
-    return Path("../scratch/reference_image.h5")
+    return reference_fp
+
+
+def find_singleplane_input(
+    data_dir: Path,
+    output_dir: Path,
+    plane_id: str,
+    selector: str,
+) -> Tuple[Path, Path]:
+    """Locate a Bergamo plane movie and create its output directory.
+
+    Parameters
+    ----------
+    data_dir : Path
+        Input directory, or the movie itself.
+    output_dir : Path
+        Results root.
+    plane_id : str
+        Canonical plane id; names the output directory.
+    selector : str
+        Substring identifying this acquisition's movie, which is the session
+        name rather than the plane id.
+
+    Returns
+    -------
+    tuple of (Path, Path)
+        The movie and the per-plane output directory.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no matching movie is present.
+    """
+    h5_file = Path(data_dir)
+    if not h5_file.is_file():
+        matches = [f for f in h5_file.rglob("*.h5") if selector in str(f)]
+        if not matches:
+            raise FileNotFoundError(
+                f"No '*.h5' movie whose path contains {selector!r} found "
+                f"under {data_dir}"
+            )
+        h5_file = matches[0]
+    return h5_file, make_output_directory(output_dir, plane_id)
 
 
 def singleplane_motion_correction(
     h5_file: Path,
     output_dir: Path,
-    session,
-    unique_id: str,
+    core_raw: dict,
+    version: str,
     debug: bool = False,
-):
-    """Process single plane data for suite2p parameters
+    scratch_dir: Path = SCRATCH_DIR,
+) -> Tuple[str, Path, str]:
+    """Build the Bergamo reference image and the movie to register.
 
     Parameters
     ----------
-    h5_file: Path
-        path to h5 file
-    output_dir: Path
-        output directory
-    session: dict
-        session metadata
-    unique_id: str
-        experiment id from data description
-    debug: bool
+    h5_file : Path
+        The plane's HDF5 movie.
+    output_dir : Path
+        The per-plane output directory.
+    core_raw : dict
+        Raw ``session.json`` (v1) or ``acquisition.json`` (v2) dict.
+    version : str
+        Schema version string.
+    debug : bool, optional
+        Register only the first :data:`DEBUG_SINGLEPLANE_FRAMES` frames.
+    scratch_dir : Path, optional
+        Writable directory for the reference and debug movies.
 
     Returns
     -------
-    h5_file: str
-        path to h5 file
-    output_dir: Path
-        output directory
-    reference_image_fp: str
-        path to reference image
+    tuple of (str, Path, str)
+        The movie to register, the output directory, and the reference
+        movie.
     """
-    if not h5_file.is_file():
-        h5_file = [f for f in h5_file.rglob("*.h5") if unique_id in str(f)][0]
-    output_dir = make_output_directory(output_dir, unique_id)
-    reference_image_fp = generate_single_plane_reference(h5_file, session)
+    reference_image_fp = generate_single_plane_reference(
+        h5_file, core_raw, version, scratch_dir
+    )
     if debug:
-        stem = h5_file.stem
-        debug_file = Path("../scratch") / f"{stem}_debug.h5"
+        debug_file = Path(scratch_dir) / f"{h5_file.stem}_debug.h5"
         with h5py.File(h5_file, "r") as f:
-            data = f["data"][:5000]
+            available_frames = f["data"].shape[0]
+            effective_frames = min(
+                DEBUG_SINGLEPLANE_FRAMES, available_frames
+            )
+            data = f["data"][:effective_frames]
             trial_locations = f["trial_locations"][()]
             epoch_filenames = f["epoch_locations"][()]
+        if DEBUG_SINGLEPLANE_FRAMES > available_frames:
+            logger.warning(
+                "Truncating %s to %d frames (%d requested): movie already "
+                "shorter than the debug target - upstream debug cap in "
+                "effect.",
+                h5_file.name,
+                effective_frames,
+                DEBUG_SINGLEPLANE_FRAMES,
+            )
+        else:
+            logger.info(
+                "Truncating %s to %d frames.", h5_file.name, effective_frames
+            )
         with h5py.File(debug_file, "a") as f:
             f.create_dataset("data", data=data)
             f.create_dataset("trial_locations", data=trial_locations)

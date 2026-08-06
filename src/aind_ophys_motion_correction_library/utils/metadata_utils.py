@@ -1,62 +1,96 @@
 """aind-data-schema v1/v2 metadata reads for motion correction.
 
 A thin, capsule-specific layer over the shared ``aind_pophys_metadata``
-library. The v1/v2 dict paths, schema-version dispatch, and the
-``Processing`` builders live in the shared library; this module only assembles
-the motion-correction ``MotionCorrectionMetadata`` view and its
-motion-correction-specific ``DataProcess``.
+library. The v1/v2 dict paths, schema-version dispatch, the ``Code`` builder
+and the ``processing.json`` lifecycle live in the shared library; this module
+only assembles the ``MotionCorrectionMetadata`` view, resolves this task's
+canonical plane id, and names the motion-correction code artifact.
 """
 
-import os
+import logging
 from dataclasses import dataclass
-from datetime import datetime as dt
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import pytz
-from aind_data_schema.core.processing import DataProcess, Processing
-from aind_data_schema_models.process_names import ProcessName
+from aind_data_schema.components.identifiers import Code
 from aind_pophys_metadata import fields, io
 from aind_pophys_metadata import processing as shared_processing
 
-_SEATTLE_TZ = pytz.timezone("America/Los_Angeles")
+logger = logging.getLogger(__name__)
 
-CODE_URL = (
-    "https://github.com/AllenNeuralDynamics/"
-    "aind-ophys-motion-correction/tree/main/code"
-)
+# Human-readable name of the motion-correction code artifact.
+CODE_NAME = "aind-ophys-motion-correction"
+
+# Distribution name of this backing library. The shared builder derives both
+# ``Code.url`` and ``Code.version`` from it, so the two always name one
+# artifact: the released library.
+LIBRARY_NAME = "aind-ophys-motion-correction-library"
+
+# Plane id used when the acquisition metadata declares no planes at all.
+DEFAULT_PLANE_ID = "plane_0"
+
+# Bergamo single-plane acquisitions take their reference movie from the first
+# conditioning epoch.
+BCI_STIMULUS_NAME = "single neuron BCI conditioning"
+
+# v1 carried the TIFF stem on ``stimulus_epochs[*].output_parameters``. The
+# v1 -> v2 upgrade drops that field outright, but preserves the same value
+# verbatim on the correspondingly-timed data stream's ``notes``.
+TIFF_STEM_KEY = "tiff_stem"
+TIFF_STEM_NOTE_PREFIX = f"{TIFF_STEM_KEY}:"
 
 
 @dataclass(frozen=True)
 class MotionCorrectionMetadata:
     """Minimal metadata motion correction consumes.
 
-    ``frame_rate`` drives temporal detrending and preview downsampling;
-    the remaining fields are identifiers used only for routing, logging,
-    and output naming.
+    Attributes
+    ----------
+    frame_rate : float or None
+        Acquisition frame rate in Hz; drives temporal detrending and preview
+        downsampling. ``None`` when no source supplied one.
+    instrument_id : str or None
+        Instrument/rig identifier, used only to route Bergamo acquisitions.
+    subject_id : str or None
+        Subject identifier, used only for logging.
+    dataset_name : str or None
+        Session name from ``data_description.json``. Session-level, so it is
+        never a plane id - it is identical for every plane of a multiplane
+        acquisition.
+    fov_ids : tuple of str
+        Canonical plane/FOV ids for the whole acquisition, in plane order.
+        Empty when the core file declares no planes.
     """
 
     frame_rate: Optional[float] = None
     instrument_id: Optional[str] = None
     subject_id: Optional[str] = None
     dataset_name: Optional[str] = None
+    fov_ids: Tuple[str, ...] = ()
 
 
 def load_motion_correction_metadata(
     input_dir: Path,
+    *,
+    common: Optional[io.CommonMetadata] = None,
+    cli_override: Optional[float] = None,
 ) -> MotionCorrectionMetadata:
     """Read v1/v2 metadata for motion correction from ``input_dir``.
 
     Dispatches on which core file is present (``acquisition.json`` -> v2,
     ``session.json`` -> v1). ``frame_rate`` falls back to ``platform.json``
-    when the core file lacks it; the caller applies any final CLI default.
-    ``subject_id`` is read from the core file (canonical) and falls back to
-    ``subject.json``; ``dataset_name`` comes from ``data_description.json``.
+    and then to ``cli_override``; it is not required here, because the
+    multiplane path has a further sync-file fallback of its own.
 
     Parameters
     ----------
     input_dir : Path
         Directory searched recursively for the metadata files.
+    common : aind_pophys_metadata.io.CommonMetadata, optional
+        Pre-loaded core/sibling documents, so a caller that already needs the
+        raw dicts does not read them twice.
+    cli_override : float, optional
+        Operator-supplied frame rate, used when the metadata provides none.
 
     Returns
     -------
@@ -71,108 +105,187 @@ def load_motion_correction_metadata(
         If both core files are present (ambiguous input).
     """
     input_dir = Path(input_dir)
-    core_path = io.find_acquisition_file(input_dir)
-    version = io.detect_schema_version(core_path)
-    core_raw = io.load_json(core_path)
-
-    platform_path = io.find(input_dir, "platform.json")
-    platform_raw = io.load_json(platform_path) if platform_path else None
-    subject_path = io.find(input_dir, "subject.json")
-    subject_raw = io.load_json(subject_path) if subject_path else None
-    dd_path = io.find(input_dir, "data_description.json")
-    dd_raw = io.load_json(dd_path) if dd_path else None
-
+    common = common if common is not None else io.load_common(input_dir)
     return MotionCorrectionMetadata(
-        frame_rate=fields.get_frame_rate(version, core_raw, platform_raw),
-        instrument_id=fields.get_instrument_id(version, core_raw),
-        subject_id=fields.get_subject_id(core_raw, subject_raw),
-        dataset_name=fields.get_dataset_name(dd_raw),
+        frame_rate=fields.resolve_frame_rate(
+            common.version,
+            common.core_raw,
+            common.platform_raw,
+            core_file=common.core_path,
+            input_dir=input_dir,
+            cli_override=cli_override,
+            required=False,
+        ),
+        instrument_id=fields.get_instrument_id(
+            common.version, common.core_raw
+        ),
+        subject_id=fields.get_subject_id(
+            common.core_raw, common.subject_raw
+        ),
+        dataset_name=fields.get_dataset_name(common.data_description_raw),
+        fov_ids=fields.get_fov_ids(common.version, common.core_raw),
     )
 
 
-def build_data_process(
+def resolve_plane_id(
+    fov_ids: Sequence[str],
+    scavenged: Optional[str] = None,
+    fallback: str = DEFAULT_PLANE_ID,
+) -> str:
+    """Return the plane id this task's output directory is named after.
+
+    Motion correction creates the per-plane directories every downstream
+    capsule keys on, so its plane id must be the canonical one derived from
+    the acquisition metadata (see
+    :func:`aind_pophys_metadata.fields.get_fov_ids`). Metadata that declares
+    no planes still has to run, so every degraded case falls back to the
+    caller's directory-derived id and warns rather than raising.
+
+    Parameters
+    ----------
+    fov_ids : sequence of str
+        Canonical plane ids for the whole acquisition.
+    scavenged : str, optional
+        Plane id recovered from the input directory layout. Pass it for a
+        multiplane task, where the canonical set names every plane and only
+        the input file says which one this task holds; omit it for a
+        single-plane task, where the canonical id is unambiguous.
+    fallback : str, optional
+        Id to use when ``scavenged`` is omitted and no single canonical id
+        can be chosen.
+
+    Returns
+    -------
+    str
+        The plane id to name this task's outputs with.
+    """
+    ids = tuple(fov_ids or ())
+    if scavenged is None:
+        if len(ids) == 1:
+            return ids[0]
+        if not ids:
+            logger.warning(
+                "Acquisition metadata declares no planes; naming outputs "
+                "after the directory-derived id %r.",
+                fallback,
+            )
+        else:
+            logger.warning(
+                "Acquisition metadata declares %d planes %s but this task "
+                "resolves a single plane; naming outputs after the "
+                "directory-derived id %r.",
+                len(ids),
+                list(ids),
+                fallback,
+            )
+        return fallback
+    if scavenged in ids:
+        return scavenged
+    if not ids:
+        logger.warning(
+            "Acquisition metadata declares no planes; keeping the "
+            "directory-derived plane id %r.",
+            scavenged,
+        )
+    else:
+        fields.validate_scavenged_ids([scavenged], ids, logger)
+    return scavenged
+
+
+def _v2_stems_by_start_time(core_raw: dict) -> Dict[Any, str]:
+    """Index v2 data-stream TIFF stems by stream start time.
+
+    Parameters
+    ----------
+    core_raw : dict
+        Raw ``acquisition.json`` dict.
+
+    Returns
+    -------
+    dict
+        Mapping of ``stream_start_time`` to TIFF stem.
+    """
+    stems: Dict[Any, str] = {}
+    for stream in core_raw.get("data_streams") or []:
+        notes = stream.get("notes") or ""
+        if notes.startswith(TIFF_STEM_NOTE_PREFIX):
+            stems[stream.get("stream_start_time")] = notes[
+                len(TIFF_STEM_NOTE_PREFIX):
+            ]
+    return stems
+
+
+def bci_epoch_tiff_stem(core_raw: dict, version: str) -> str:
+    """Return the TIFF stem of the first BCI conditioning epoch.
+
+    v1 records the stem on the epoch itself. The v1 -> v2 upgrade drops
+    ``stimulus_epochs[*].output_parameters`` entirely, so the v2 read
+    recovers it from the data stream sharing the epoch's start time - the
+    only place the value survives, verified against real upgrader output.
+    Matching is by start time rather than by list position, because the
+    upgrade is free to drop or reorder epochs.
+
+    Parameters
+    ----------
+    core_raw : dict
+        Raw ``session.json`` (v1) or ``acquisition.json`` (v2) dict.
+    version : str
+        Schema version string (see
+        :func:`aind_pophys_metadata.io.detect_schema_version`).
+
+    Returns
+    -------
+    str
+        The conditioning epoch's TIFF stem.
+
+    Raises
+    ------
+    ValueError
+        If no conditioning epoch yields a stem. The message names the
+        stimulus and the schema version, so a v2 document whose stream notes
+        were lost is distinguishable from an unrelated acquisition.
+    """
+    is_v1 = version == io.SCHEMA_V1
+    stems_by_time = {} if is_v1 else _v2_stems_by_start_time(core_raw)
+    for epoch in core_raw.get("stimulus_epochs") or []:
+        if epoch.get("stimulus_name") != BCI_STIMULUS_NAME:
+            continue
+        if is_v1:
+            stem = (epoch.get("output_parameters") or {}).get(TIFF_STEM_KEY)
+        else:
+            stem = stems_by_time.get(epoch.get("stimulus_start_time"))
+        if stem:
+            return stem
+    raise ValueError(
+        f"No {BCI_STIMULUS_NAME!r} stimulus epoch yielding a "
+        f"{TIFF_STEM_KEY!r} was found in the schema-{version} acquisition "
+        "metadata; the Bergamo reference movie cannot be built."
+    )
+
+
+def build_code(
     parameters: dict,
-    start_time: dt,
-    end_time: dt,
     input_data: Optional[List[str]] = None,
-    output_path: Optional[str] = None,
-    output_parameters: Optional[dict] = None,
-    plane_id: Optional[str] = None,
-    error: Optional[BaseException] = None,
-) -> DataProcess:
-    """Construct a v2 DataProcess for motion correction.
+) -> Code:
+    """Construct the motion-correction ``Code`` block.
 
     Parameters
     ----------
     parameters : dict
-        Capsule configuration parameters (from MotionCorrectionSettings).
-    start_time : dt
-        Processing start time.
-    end_time : dt
-        Processing end time.
+        Capsule configuration parameters (from ``MotionCorrectionSettings``).
     input_data : list of str, optional
         Input data path(s)/asset name(s) for provenance.
-    output_path : str, optional
-        Path to this process's output directory, relative to the results
-        root.
-    output_parameters : dict, optional
-        Actual parameters used and output metrics.
-    plane_id : str, optional
-        Plane/FOV id this run processed. Qualifies the process name so it
-        stays unique once every plane's document is merged.
-    error : Exception, optional
-        The exception that terminated the run, or ``None`` on success. The
-        message is recorded in ``notes``.
 
     Returns
     -------
-    DataProcess
-        The populated motion-correction data process.
+    Code
+        The populated code block. Url and version both come from this
+        library's distribution, so the two never describe different
+        artifacts.
     """
-    notes = (
-        None
-        if error is None
-        else f"Run failed with {type(error).__name__}: {error}"
-    )
-    code = shared_processing.build_code(
-        url=CODE_URL,
-        name="aind-ophys-motion-correction",
-        version=os.getenv("VERSION", ""),
+    return shared_processing.build_code(
+        CODE_NAME,
+        library_name=LIBRARY_NAME,
         parameters=parameters,
         input_data=input_data,
     )
-    return shared_processing.build_data_process(
-        process_type=ProcessName.VIDEO_MOTION_CORRECTION,
-        code=code,
-        start_time=start_time.astimezone(_SEATTLE_TZ),
-        end_time=end_time.astimezone(_SEATTLE_TZ),
-        name="Suite2P motion correction",
-        plane_id=plane_id,
-        output_path=output_path,
-        output_parameters=output_parameters,
-        notes=notes,
-        resources=shared_processing.resource_usage(),
-    )
-
-
-def build_processing(data_processes: List[DataProcess]) -> Processing:
-    """Wrap data processes into a full v2 Processing object."""
-    return shared_processing.build_processing(data_processes)
-
-
-def write_processing_json(processing: Processing, output_dir: Path) -> Path:
-    """Serialize a Processing object to ``processing.json``.
-
-    Parameters
-    ----------
-    processing : Processing
-        The processing document to write.
-    output_dir : Path
-        Directory into which ``processing.json`` is written.
-
-    Returns
-    -------
-    Path
-        The path written.
-    """
-    return shared_processing.write_processing_json(processing, output_dir)

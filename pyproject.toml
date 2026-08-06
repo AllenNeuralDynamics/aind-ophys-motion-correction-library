@@ -17,10 +17,9 @@ readme = "README.md"
 version = "0.0.2"
 
 dependencies = [
-    "aind-data-schema==2.8.1",
-    "aind-data-schema-models==5.7.3",
-    "aind-qcportal-schema>=0.6.4",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@59e84ce33cd932261a031fbe457291a91974ca55",
+    "aind-data-schema==2.9.0",
+    "aind-data-schema-models==6.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@afcb367f71c3127173a1ae4357135a41901e0466",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     "aind-ophys-utils",
     "torch",

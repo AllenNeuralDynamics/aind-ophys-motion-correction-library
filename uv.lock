@@ -28,7 +28,7 @@ wheels = [
 
 [[package]]
 name = "aind-data-schema"
-version = "2.8.1"
+version = "2.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aind-data-schema-models" },
@@ -36,23 +36,23 @@ dependencies = [
     { name = "pydantic-extra-types" },
     { name = "tzdata" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1b/4d/6e1a5175da36d65c0467cab77bc508b7a4b9de4f27f9e6385288cdbece08/aind_data_schema-2.8.1.tar.gz", hash = "sha256:5f3dc809765bd25f27b667d1496499b1a5601c75e89e3804ccb2b0609f8ab84a", size = 960610, upload-time = "2026-06-09T16:15:45.62Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c0/74/c902e88c16a482f4d8af7f4dac7b8087c8c9318c7371a45c6c9630c78e77/aind_data_schema-2.9.0.tar.gz", hash = "sha256:fc5f9465b4fd01015a09b7ec64d9b8e40a74172a7ed7c8913652021870f88dfa", size = 1431312, upload-time = "2026-08-01T02:54:10.51Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/d2/84fe4192caceb64a3f12d02d25aa3f25d7cf019d58890a24c75ab33c8791/aind_data_schema-2.8.1-py3-none-any.whl", hash = "sha256:71ea58072250719858cd8727bae3a8d974bfccd54b7e37aba21161172b54be41", size = 93863, upload-time = "2026-06-09T16:15:44.154Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/a2/bff3032e03a23623f002e7b9054098b1612705c7809ba922f936aef88c77/aind_data_schema-2.9.0-py3-none-any.whl", hash = "sha256:334fba1e25be1525aaf5ee119ff36a361aa1ac40cde1b66ebd972daf698f56d4", size = 104599, upload-time = "2026-08-01T02:54:09.026Z" },
 ]
 
 [[package]]
 name = "aind-data-schema-models"
-version = "5.7.3"
+version = "6.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "importlib-resources" },
     { name = "pydantic" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/4f/9b3c124c7b43bc0318b247c933ad945d0613f3f6088290db3542bbdf97fa/aind_data_schema_models-5.7.3.tar.gz", hash = "sha256:d68db456c0ce0aafa9b7f4da2f2c0e0925c724d1a4f1a509ca43e3a5f945a92c", size = 342029, upload-time = "2026-06-04T03:59:01.784Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/a0/f89dafd84fbb1b0e9744954c8ad6fff5309644a9ad89eead0141e0695c68/aind_data_schema_models-6.2.0.tar.gz", hash = "sha256:912c5d31c2e7b1703e8e81df0b387b8f782078ea653bd5d7d1b36c5df0f76d13", size = 362436, upload-time = "2026-06-30T22:22:03.399Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/45/1a/b4706006fb390d4e64e1df6e9137683aca082e754b79d91e488c756bbf59/aind_data_schema_models-5.7.3-py3-none-any.whl", hash = "sha256:cd7c1a311338aeecfc1463ac069ef34db67f15508be17daa47d6155a00f1cbe0", size = 310756, upload-time = "2026-06-04T03:59:00.492Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/d1/db9a58bbfa14a6184f7a8d275b3246bbba352adf017a7240a34d8cea44c3/aind_data_schema_models-6.2.0-py3-none-any.whl", hash = "sha256:727a4c41c82893fc9d7fb572ea52d4c13b1961dc9bbcdcce02ad05884ceafbad", size = 336254, upload-time = "2026-06-30T22:22:01.859Z" },
 ]
 
 [[package]]
@@ -64,7 +64,6 @@ dependencies = [
     { name = "aind-data-schema-models" },
     { name = "aind-ophys-utils" },
     { name = "aind-pophys-metadata" },
-    { name = "aind-qcportal-schema" },
     { name = "h5py" },
     { name = "log-schema", extra = ["cloudwatch"] },
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -102,11 +101,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aind-data-schema", specifier = "==2.8.1" },
-    { name = "aind-data-schema-models", specifier = "==5.7.3" },
+    { name = "aind-data-schema", specifier = "==2.9.0" },
+    { name = "aind-data-schema-models", specifier = "==6.2.0" },
     { name = "aind-ophys-utils" },
-    { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=ad94805247b21a55c8e4bc03eda3f9650b41240d" },
-    { name = "aind-qcportal-schema", specifier = ">=0.6.4" },
+    { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=afcb367f71c3127173a1ae4357135a41901e0466" },
     { name = "h5py" },
     { name = "log-schema", extras = ["cloudwatch"], git = "https://github.com/AllenNeuralDynamics/aind-log-utils.git?subdirectory=python&rev=f09685e" },
     { name = "matplotlib" },
@@ -165,7 +163,7 @@ wheels = [
 [[package]]
 name = "aind-pophys-metadata"
 version = "0.1.0"
-source = { git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=ad94805247b21a55c8e4bc03eda3f9650b41240d#ad94805247b21a55c8e4bc03eda3f9650b41240d" }
+source = { git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=afcb367f71c3127173a1ae4357135a41901e0466#afcb367f71c3127173a1ae4357135a41901e0466" }
 dependencies = [
     { name = "aind-data-schema" },
     { name = "aind-data-schema-models" },
