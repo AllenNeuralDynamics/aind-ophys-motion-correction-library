@@ -1855,8 +1855,11 @@ def find_singleplane_input(
     plane_id : str
         Canonical plane id; names the output directory.
     selector : str
-        Substring identifying this acquisition's movie, which is the session
-        name rather than the plane id.
+        Substring identifying this acquisition's movie in its staged path.
+        The Bergamo converter names its output after the plane id, so the
+        caller currently passes the same value as ``plane_id``; kept as a
+        separate parameter since a selector is a different concept from the
+        id that names this capsule's own output directory.
 
     Returns
     -------

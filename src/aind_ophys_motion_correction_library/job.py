@@ -110,12 +110,14 @@ def _resolve_plane_input(
         ) or find_one(data_dir, "pophys")
         output_dir = reg.make_output_directory(results_root, unique_id)
     elif data_type == "h5" and _is_bergamo(metadata):
-        # The movie is named after the session, so the selector that finds
-        # it and the plane id that names the outputs are different values.
-        selector = metadata.dataset_name or mu.DEFAULT_PLANE_ID
-        unique_id = mu.resolve_plane_id(metadata.fov_ids, fallback=selector)
+        # The Bergamo converter names its stitched movie after the plane id
+        # (e.g. plane_0/plane_0.h5) -- the same id this capsule uses to name
+        # its own output directory -- so one value serves as both.
+        unique_id = mu.resolve_plane_id(
+            metadata.fov_ids, fallback=mu.DEFAULT_PLANE_ID
+        )
         input_file, output_dir = reg.find_singleplane_input(
-            data_dir, results_root, unique_id, selector
+            data_dir, results_root, unique_id, unique_id
         )
     elif data_type == "h5":
         input_file, directory_id = reg.find_multiplane_input(data_dir)
