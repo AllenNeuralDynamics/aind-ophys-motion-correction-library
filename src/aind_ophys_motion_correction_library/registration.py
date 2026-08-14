@@ -15,7 +15,7 @@ from itertools import product
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from time import time
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
 import h5py
@@ -28,8 +28,7 @@ from aind_ophys_utils.video_utils import (
     downsample_array,
     downsample_h5_video,
 )
-from aind_pophys_metadata import fields, io
-from aind_pophys_metadata.paths import find_one
+from aind_pophys_metadata import CoreMetadata, find_one, io
 from matplotlib import pyplot as plt  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont
 from ScanImageTiffReader import ScanImageTiffReader
@@ -64,7 +63,7 @@ DEBUG_SINGLEPLANE_FRAMES = 5000
 SCRATCH_DIR = Path("../scratch")
 
 
-def is_S3(file_path: str):
+def is_S3(file_path: str) -> bool:
     """Test if a file is in a S3 bucket
     Parameters
     ----------
@@ -168,7 +167,7 @@ def tiff_to_numpy(
 
     Parameters
     ----------
-    tiff_list : List[str]
+    tiff_list : List[Path]
         List of TIFF file paths to process
     trim_frames_start : int, optional
         Number of frames to remove from the start (default: 0)
@@ -252,12 +251,16 @@ def load_initial_frames(
 
     Parameters
     ----------
-    file_path : str
-        Location of the raw ophys, HDF5 data to load.
+    file_path : str or list
+        HDF5 movie path, or a list of TIFF paths.
     h5py_key : str
         Name of the dataset to load from the HDF5 file.
     n_frames : int
         Number of frames to load from the input HDF5 data.
+    trim_frames_start : int
+        Number of frames to disregard from the start of the movie. Default 0.
+    trim_frames_end : int
+        Number of frames to disregard from the end of the movie. Default 0.
 
     Returns
     -------
@@ -302,7 +305,7 @@ def combine_images_with_individual_titles(
         Path to save the combined image.
     title1 : str
          Title text for the first image.
-    title2 - str
+    title2 : str
         Title text for the second image.
 
     Returns
@@ -336,22 +339,19 @@ def combine_images_with_individual_titles(
     # Draw the titles
     draw = ImageDraw.Draw(combined_image)
     try:
-        font = ImageFont.truetype(
-            "arial.ttf", 24
-        )  # You can replace with a path to your desired font
+        font = ImageFont.truetype("arial.ttf", 24)
     except IOError:
-        font = (
-            ImageFont.load_default()
-        )  # Fallback to default font; may not match expected size
+        # Fallback font; its size may not match the requested 24pt.
+        font = ImageFont.load_default()
 
-    # Title 1: Above the second image
+    # Title 1: above the first image
     bbox1 = draw.textbbox((0, 0), title1, font=font)
     text_width1 = bbox1[2] - bbox1[0]
     text_y1 = padding
     text_x1 = padding + (img1.width - text_width1) // 2
     draw.text((text_x1, text_y1), title1, fill="black", font=font)
 
-    # Title 2: Above the first image
+    # Title 2: above the second image
     bbox2 = draw.textbbox((0, 0), title2, font=font)
     text_width2 = bbox2[2] - bbox2[0]
     text_x2 = padding * 2 + img2.width + (img2.width - text_width2) // 2
@@ -632,12 +632,13 @@ def optimize_motion_parameters(
             Maximum shift allowed as a fraction of the image dimensions.
     trim_frames_start : int, optional
         Number of frames to disregard from the start of the movie. Default 0.
-    trim_frames_start : int, optional
+    trim_frames_end : int, optional
         Number of frames to disregard from the end of the movie. Default 0.
     n_batches : int
         Number of batches to load. Processing a large number of frames at once
         will likely result in running out of memory, hence processing in
-        batches. Total returned size isn_batches * suit2p_args['batch_size'].
+        batches. Total returned size is
+        n_batches * suite2p_args['batch_size'].
     logger : Optional[Callable]
         Function to print to stdout or a log.
 
@@ -735,24 +736,24 @@ def optimize_motion_parameters(
 
 
 def load_representative_sub_frames(
-    h5py_name,
-    h5py_key,
+    h5py_name: Union[str, Path],
+    h5py_key: str,
     trim_frames_start: int = 0,
     trim_frames_end: int = 0,
     n_batches: int = 20,
     batch_size: int = 500,
-):
+) -> np.ndarray:
     """Load a subset of frames spanning the full movie.
 
     Parameters
     ----------
-    h5py_name : str
+    h5py_name : str or Path
         Path to the h5 file to load frames from.
     h5py_key : str
         Name of the h5 dataset containing the movie.
     trim_frames_start : int, optional
         Number of frames to disregard from the start of the movie. Default 0.
-    trim_frames_start : int, optional
+    trim_frames_end : int, optional
         Number of frames to disregard from the end of the movie. Default 0.
     n_batches : int
         Number of batches to load. Total returned size is
@@ -763,6 +764,9 @@ def load_representative_sub_frames(
 
     Returns
     -------
+    np.ndarray
+        The concatenated batches, or the whole movie when it holds fewer
+        frames than were requested.
     """
     output_frames = []
     frame_fracts = np.arange(0, 1, 1 / n_batches)
@@ -863,12 +867,12 @@ def create_ave_image(
     }
 
 
-def add_modify_required_parameters(suite2p_args: dict):
+def add_modify_required_parameters(suite2p_args: dict) -> None:
     """Check that minimum parameters needed by suite2p registration are
     available. If not add them to the suite2p_args dict.
 
-    Additionally, make sure that nonrigid is set to false as are gridsearch
-    of parameters above is not setup to use nonrigid.
+    Additionally, force nonrigid off: the parameter grid search does not
+    support nonrigid registration.
 
     Parameters
     ----------
@@ -928,7 +932,7 @@ def check_and_warn_on_datatype(
     logger: Callable,
     filetype: str = "h5",
     h5py_key: str = "",
-):
+) -> None:
     """Suite2p assumes int16 types throughout code. Check that the input
     data is type int16 else throw a warning.
 
@@ -965,7 +969,7 @@ def check_and_warn_on_datatype(
         )
 
 
-def _mean_of_batch(i, array):
+def _mean_of_batch(i: int, array: np.ndarray) -> np.ndarray:
     """Return the per-frame mean of a 1000-frame batch starting at i."""
     return array[i : i + 1000].mean(axis=(1, 2))
 
@@ -978,7 +982,7 @@ def find_movie_start_end_empty_frames(
     n_jobs: Optional[int] = None,
 ) -> Tuple[int, int]:
     """Load a movie from HDF5 and find frames at the start and end of the
-    movie that are empty or pure noise and 5 sigma discrepant from the
+    movie that are empty or pure noise and n_sigma discrepant from the
     average frame.
 
     If a non-contiguous set of frames is found, the code will return 0 for
@@ -986,8 +990,8 @@ def find_movie_start_end_empty_frames(
 
     Parameters
     ----------
-    h5py_name : str
-        Name of the HDF5 file to load from.
+    filepath : str or list of str
+        HDF5 movie path, or a list of TIFF paths.
     h5py_key : str
         Name of the dataset to load from the HDF5 file.
     n_sigma : float
@@ -1081,7 +1085,7 @@ def reset_frame_shift(
     dx_array: np.ndarray,
     trim_frames_start: int,
     trim_frames_end: int,
-):
+) -> None:
     """Reset the frames of a movie and their shifts.
 
     Shifts the frame back to its original location and resets the shifts for
@@ -1121,7 +1125,7 @@ def reset_frame_shift(
 def projection_process(
     data: np.ndarray, projection: str = "max"
 ) -> np.ndarray:
-    """
+    """Project a movie over time and normalize it to uint8.
 
     Parameters
     ----------
@@ -1183,20 +1187,20 @@ def identify_and_clip_outliers(
     return data, indices
 
 
-def make_output_directory(output_dir: Path, plane: str = "") -> str:
+def make_output_directory(output_dir: Path, plane: str = "") -> Path:
     """Creates the output directory if it does not exist
 
     Parameters
     ----------
     output_dir: Path
-        output directory
+        results root
     plane: str
-        plane number
+        plane id; omit for a directory directly under the root
 
     Returns
     -------
     output_dir: Path
-        output directory
+        the created ``motion_correction`` directory
     """
     if not plane:
         output_dir = output_dir / "motion_correction"
@@ -1206,7 +1210,7 @@ def make_output_directory(output_dir: Path, plane: str = "") -> str:
     return output_dir
 
 
-def check_trim_frames(data):
+def check_trim_frames(data: Dict[str, Any]) -> Dict[str, Any]:
     """Make sure that if the user sets auto_remove_empty_frames
     and timing frames is already requested, raise an error.
     """
@@ -1229,7 +1233,7 @@ def make_png(
     avg_proj_path: Path,
     summary_df: pd.DataFrame,
     dst_path: Path,
-):
+) -> Path:
     """Write the registration-summary PNG (projections + xy offsets)."""
     xo = np.abs(summary_df["x"]).max()
     yo = np.abs(summary_df["y"]).max()
@@ -1274,22 +1278,39 @@ def make_png(
     return dst_path
 
 
+def parse_block_column(column: pd.Series) -> np.ndarray:
+    """Parse a bracketed per-block CSV column back into an array.
+
+    Parameters
+    ----------
+    column : pandas.Series
+        Column of bracketed, comma-separated block values, as written by the
+        motion-transform CSV.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(n_frames, n_blocks)`` array of block values.
+    """
+    return np.array(
+        [
+            [float(value) for value in row.strip().strip("[]").split(",")]
+            for row in column
+        ],
+        dtype=np.float32,
+    )
+
+
 def make_nonrigid_png(
     output_path: Path,
     avg_proj_path: Path,
     summary_df: pd.DataFrame,
     dst_path: Path,
-):
+) -> Path:
     """Write the per-block nonrigid registration-summary PNG."""
-    nonrigid_y = np.array(
-        list(map(eval, summary_df["nonrigid_y"])), dtype=np.float32
-    )
-    nonrigid_x = np.array(
-        list(map(eval, summary_df["nonrigid_x"])), dtype=np.float32
-    )
-    nonrigid_corr = np.array(
-        list(map(eval, summary_df["nonrigid_corr"])), dtype=np.float32
-    )
+    nonrigid_y = parse_block_column(summary_df["nonrigid_y"])
+    nonrigid_x = parse_block_column(summary_df["nonrigid_x"])
+    nonrigid_corr = parse_block_column(summary_df["nonrigid_corr"])
     ops = json.loads(h5py.File(output_path)["metadata"][()].decode())[
         "suite2p_args"
     ]
@@ -1371,7 +1392,7 @@ def downsample_normalize(
     Returns
     -------
     ds: np.ndarray
-        a downsampled and normalized array
+        a downsampled array rescaled to the display range
 
     Notes
     -----
@@ -1397,7 +1418,7 @@ def downsample_normalize(
     return ds
 
 
-def flow_png(output_path: Path, dst_path: str, iPC: int = 0):
+def flow_png(output_path: Path, dst_path: str, iPC: int = 0) -> None:
     """Write PC_low/PC_high/residual-optical-flow images for one PC."""
     with h5py.File(output_path) as f:
         regPC = f["reg_metrics/regPC"]
@@ -1463,11 +1484,13 @@ def flow_png(output_path: Path, dst_path: str, iPC: int = 0):
         )
 
 
-def get_frame_rate_from_sync(sync_file, platform_data) -> float:
+def get_frame_rate_from_sync(
+    sync_file: Union[str, Path], platform_data: Dict[str, Any]
+) -> float:
     """Calculate frame rate from sync file
     Parameters
     ----------
-    sync_file: str
+    sync_file: str or Path
         path to sync file
     platform_data: dict
         platform data from platform.json
@@ -1479,10 +1502,9 @@ def get_frame_rate_from_sync(sync_file, platform_data) -> float:
     labels = [
         "vsync_2p",
         "2p_vsync",
-    ]  # older versions of sync may 2p_vsync label
-    imaging_groups = len(
-        platform_data["imaging_plane_groups"]
-    )  # Number of imaging plane groups for frequency calculation
+    ]  # older sync files label the line 2p_vsync
+    # The vsync line ticks once per plane group, so divide it back out.
+    imaging_groups = len(platform_data["imaging_plane_groups"])
     frame_rate_hz = None
     for i in labels:
         logging.info(f"Pulling framerate from sync file: {sync_file}")
@@ -1517,8 +1539,7 @@ def find_multiplane_input(data_dir: Path) -> Tuple[Path, str]:
     -------
     tuple of (Path, str)
         The plane's HDF5 movie and the plane id its filename/directory
-        encodes. The id is only a scavenged candidate; the canonical id
-        comes from the acquisition metadata.
+        encodes.
 
     Raises
     ------
@@ -1549,22 +1570,21 @@ def find_multiplane_input(data_dir: Path) -> Tuple[Path, str]:
 
 def resolve_multiplane_frame_rate(
     data_dir: Path,
-    common: io.CommonMetadata,
+    core: CoreMetadata,
     cli_override: Optional[float] = None,
 ) -> float:
     """Frame rate for a multiplane task, with a sync-file last resort.
 
-    The shared resolver covers the core acquisition file (v1 ``session.json``
-    or v2 ``acquisition.json``), ``platform.json`` and the operator override.
-    Only when all of those are silent is the rate recomputed from the sync
-    file's 2P vsync line.
+    The shared resolver covers the core acquisition file, ``platform.json``
+    and the operator override. Only when all of those are silent is the rate
+    recomputed from the sync file's 2P vsync line.
 
     Parameters
     ----------
     data_dir : Path
         Input directory, searched recursively for the sync file.
-    common : aind_pophys_metadata.io.CommonMetadata
-        Core and sibling metadata documents for this asset.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
     cli_override : float, optional
         Operator-supplied frame rate.
 
@@ -1578,26 +1598,20 @@ def resolve_multiplane_frame_rate(
     ValueError
         If no source supplies a frame rate.
     """
-    frame_rate_hz = fields.resolve_frame_rate(
-        common.version,
-        common.core_raw,
-        common.platform_raw,
-        core_file=common.core_path,
-        input_dir=data_dir,
-        cli_override=cli_override,
-        required=False,
+    frame_rate_hz = core.get_frame_rate(
+        cli_override=cli_override, required=False
     )
     if frame_rate_hz is not None:
         return frame_rate_hz
     logger.warning(
         "No frame rate in %s or %s; deriving it from the sync file.",
-        Path(common.core_path).name,
+        Path(core.core_path).name,
         io.PLATFORM_FILE,
     )
-    platform_data = common.platform_raw
+    platform_data = core.platform_raw
     if platform_data is None:
         raise ValueError(
-            f"No frame rate in {Path(common.core_path).name} and no "
+            f"No frame rate in {Path(core.core_path).name} and no "
             f"{io.PLATFORM_FILE} under {data_dir} to locate a sync file with."
         )
     sync_file = find_one(
@@ -1668,8 +1682,10 @@ def truncate_for_debug(
 
 
 def update_suite2p_args_reference_image(
-    suite2p_args: dict, args: dict, reference_image_fp=None
-):
+    suite2p_args: dict,
+    args: dict,
+    reference_image_fp: Optional[Path] = None,
+) -> Tuple[dict, dict]:
     """Update the suite2p_args dictionary with the reference image.
 
     Parameters
@@ -1766,8 +1782,7 @@ def update_suite2p_args_reference_image(
         ]
     else:
         # Create the initial reference image and store it in the
-        # suite2p_args dictionary. 8 iterations is the current default
-        # in suite2p.
+        # suite2p_args dictionary.
         tic = -time()
         logger.info("Creating custom reference image...")
         suite2p_args["refImg"] = compute_reference(
@@ -1784,8 +1799,7 @@ def update_suite2p_args_reference_image(
 
 def generate_single_plane_reference(
     fp: Path,
-    core_raw: dict,
-    version: str,
+    core: CoreMetadata,
     scratch_dir: Path = SCRATCH_DIR,
 ) -> Path:
     """Generate the Bergamo reference movie from the conditioning epoch.
@@ -1794,10 +1808,8 @@ def generate_single_plane_reference(
     ----------
     fp : Path
         Path to the plane's HDF5 movie.
-    core_raw : dict
-        Raw ``session.json`` (v1) or ``acquisition.json`` (v2) dict.
-    version : str
-        Schema version string.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
     scratch_dir : Path, optional
         Writable directory the virtual dataset is written to.
 
@@ -1809,7 +1821,7 @@ def generate_single_plane_reference(
     reference_fp = Path(scratch_dir) / "reference_image.h5"
     with h5py.File(fp, "r") as f:
         tiff_stems = json.loads(f["epoch_locations"][:][0])
-        bci_epoch_loc = mu.bci_epoch_tiff_stem(core_raw, version)
+        bci_epoch_loc = mu.bci_epoch_tiff_stem(core)
         frame_length = (
             tiff_stems[bci_epoch_loc][1] - tiff_stems[bci_epoch_loc][0]
         )
@@ -1871,8 +1883,7 @@ def find_singleplane_input(
 def singleplane_motion_correction(
     h5_file: Path,
     output_dir: Path,
-    core_raw: dict,
-    version: str,
+    core: CoreMetadata,
     debug: bool = False,
     scratch_dir: Path = SCRATCH_DIR,
 ) -> Tuple[str, Path, str]:
@@ -1884,10 +1895,8 @@ def singleplane_motion_correction(
         The plane's HDF5 movie.
     output_dir : Path
         The per-plane output directory.
-    core_raw : dict
-        Raw ``session.json`` (v1) or ``acquisition.json`` (v2) dict.
-    version : str
-        Schema version string.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
     debug : bool, optional
         Register only the first :data:`DEBUG_SINGLEPLANE_FRAMES` frames.
     scratch_dir : Path, optional
@@ -1900,7 +1909,7 @@ def singleplane_motion_correction(
         movie.
     """
     reference_image_fp = generate_single_plane_reference(
-        h5_file, core_raw, version, scratch_dir
+        h5_file, core, scratch_dir
     )
     if debug:
         debug_file = Path(scratch_dir) / f"{h5_file.stem}_debug.h5"

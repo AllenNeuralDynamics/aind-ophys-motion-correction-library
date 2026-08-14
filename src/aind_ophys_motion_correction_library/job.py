@@ -10,10 +10,11 @@ import copy
 import json
 import logging
 import shutil
+import sys
 import tempfile
 from functools import partial
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import h5py
 import numpy as np
@@ -21,8 +22,7 @@ import pandas as pd
 import suite2p
 from aind_data_schema_models.process_names import ProcessName
 from aind_ophys_utils.video_utils import encode_video
-from aind_pophys_metadata import io
-from aind_pophys_metadata.paths import find_one, relative_to_root
+from aind_pophys_metadata import CoreMetadata, find_one, io, relative_to_root
 from aind_pophys_metadata.processing import collect_upstream_process_names
 from aind_pophys_metadata.runner import stage_guard
 from log_schema.main import setup_logging
@@ -70,7 +70,7 @@ def _is_bergamo(metadata: mu.MotionCorrectionMetadata) -> bool:
 def _resolve_plane_input(
     settings: MotionCorrectionSettings,
     metadata: mu.MotionCorrectionMetadata,
-    common: io.CommonMetadata,
+    core: CoreMetadata,
 ) -> dict:
     """Locate this task's movie and resolve its canonical plane identity.
 
@@ -84,8 +84,8 @@ def _resolve_plane_input(
         Parsed settings.
     metadata : mu.MotionCorrectionMetadata
         The acquisition metadata view.
-    common : aind_pophys_metadata.io.CommonMetadata
-        Core and sibling metadata documents.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
 
     Returns
     -------
@@ -118,13 +118,13 @@ def _resolve_plane_input(
             data_dir, results_root, unique_id, selector
         )
     elif data_type == "h5":
-        input_file, scavenged_id = reg.find_multiplane_input(data_dir)
+        input_file, directory_id = reg.find_multiplane_input(data_dir)
         unique_id = mu.resolve_plane_id(
-            metadata.fov_ids, scavenged=scavenged_id
+            metadata.fov_ids, directory_id=directory_id
         )
         output_dir = reg.make_output_directory(results_root, unique_id)
         frame_rate_hz = reg.resolve_multiplane_frame_rate(
-            data_dir, common, settings.frame_rate
+            data_dir, core, settings.frame_rate
         )
     else:
         raise ValueError(
@@ -135,7 +135,7 @@ def _resolve_plane_input(
     if frame_rate_hz is None:
         raise ValueError(
             "No frame rate could be resolved from "
-            f"{Path(common.core_path).name}, {io.PLATFORM_FILE} or "
+            f"{Path(core.core_path).name}, {io.PLATFORM_FILE} or "
             "--frame_rate."
         )
     return {
@@ -150,7 +150,7 @@ def _resolve_plane_input(
 def _prepare_movie(
     settings: MotionCorrectionSettings,
     metadata: mu.MotionCorrectionMetadata,
-    common: io.CommonMetadata,
+    core: CoreMetadata,
     ctx: dict,
 ) -> None:
     """Build the reference movie and apply any debug truncation, in place.
@@ -161,8 +161,8 @@ def _prepare_movie(
         Parsed settings.
     metadata : mu.MotionCorrectionMetadata
         The acquisition metadata view.
-    common : aind_pophys_metadata.io.CommonMetadata
-        Core and sibling metadata documents.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
     ctx : dict
         Context from :func:`_resolve_plane_input`; ``input_file`` and
         ``reference_image_fp`` are updated.
@@ -173,8 +173,7 @@ def _prepare_movie(
         input_file, _, reference_image_fp = reg.singleplane_motion_correction(
             Path(ctx["input_file"]),
             ctx["output_dir"],
-            common.core_raw,
-            common.version,
+            core,
             debug=settings.debug,
         )
         ctx["input_file"] = input_file
@@ -367,14 +366,18 @@ def _write_motion_csv(suite2p_args: dict, args: dict, reg_out: dict) -> None:
     ops = reg_out["ops"]
     if suite2p_args["nonrigid"]:
 
-        def _fmt(key):
-            """Format a per-block ops array column as CSV-safe strings."""
+        def _fmt(key: str) -> List[str]:
+            """Format a per-block ops array column as CSV-safe strings.
+
+            The line width is unbounded so a wide block grid stays on one
+            line; a wrapped array splits the CSV row it belongs to.
+            """
             return [
                 np.array2string(
                     arr,
                     separator=",",
                     suppress_small=True,
-                    max_line_width=4096,
+                    max_line_width=sys.maxsize,
                 )
                 for arr in ops[key]
             ]
@@ -501,12 +504,12 @@ def _write_quality_control(
     summary_ref = relative_to_root(
         results_root, Path(args["registration_summary_output"])
     )
-    combined_ref = relative_to_root(
+    max_proj_ref = relative_to_root(
         results_root, Path(args["max_projection_output"])
     )
     metrics = [
         qc.build_registration_summary_metric(ctx["unique_id"], summary_ref),
-        qc.build_fov_quality_metric(ctx["unique_id"], combined_ref),
+        qc.build_fov_quality_metric(ctx["unique_id"], max_proj_ref),
     ]
     qc.write_quality_control_json(
         qc.build_quality_control(metrics), output_dir
@@ -600,7 +603,7 @@ def _build_args(settings: MotionCorrectionSettings, ctx: dict) -> dict:
 def _run_motion_correction(
     settings: MotionCorrectionSettings,
     metadata: mu.MotionCorrectionMetadata,
-    common: io.CommonMetadata,
+    core: CoreMetadata,
     ctx: dict,
 ) -> dict:
     """Register the movie and write every output except processing.json.
@@ -611,8 +614,8 @@ def _run_motion_correction(
         Parsed settings.
     metadata : mu.MotionCorrectionMetadata
         The acquisition metadata view.
-    common : aind_pophys_metadata.io.CommonMetadata
-        Core and sibling metadata documents.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
     ctx : dict
         Context from :func:`_resolve_plane_input`, carrying ``args``.
 
@@ -621,7 +624,7 @@ def _run_motion_correction(
     dict
         Summary statistics for ``DataProcess.output_parameters``.
     """
-    _prepare_movie(settings, metadata, common, ctx)
+    _prepare_movie(settings, metadata, core, ctx)
     args = ctx["args"]
     args["refImg"] = (
         [ctx["reference_image_fp"]] if ctx["reference_image_fp"] else []
@@ -666,10 +669,10 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
         through the core v2 schema objects after writing.
     """
     settings = settings or MotionCorrectionSettings()
-    common = io.load_common(settings.input_dir)
+    core = CoreMetadata.load(settings.input_dir)
     metadata = mu.load_motion_correction_metadata(
         settings.input_dir,
-        common=common,
+        core=core,
         cli_override=settings.frame_rate,
     )
     setup_logging(
@@ -680,7 +683,7 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
         },
     )
 
-    ctx = _resolve_plane_input(settings, metadata, common)
+    ctx = _resolve_plane_input(settings, metadata, core)
     ctx["args"] = _build_args(settings, ctx)
     ctx["input_data"] = [
         relative_to_root(
@@ -705,7 +708,7 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
             exclude=f"{ctx['unique_id']}: {DATA_PROCESS_NAME}",
         )
         stage.output_parameters = _run_motion_correction(
-            settings, metadata, common, ctx
+            settings, metadata, core, ctx
         )
 
     if settings.verify:

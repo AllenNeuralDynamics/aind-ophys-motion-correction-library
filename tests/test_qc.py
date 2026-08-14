@@ -12,24 +12,24 @@ from aind_ophys_motion_correction_library import qc
 class TestQCMetrics(unittest.TestCase):
     """Metric builders carry the standard tags and grouping."""
 
-    def test_registration_summary_metric(self):
+    def test_registration_summary_metric(self) -> None:
         """Registration-summary metric names, tags, and reference set."""
         m = qc.build_registration_summary_metric("plane_0", "ref.png")
         self.assertIn("plane_0", m.name)
         self.assertEqual(m.tags["evaluation"], "Registration Summary")
         self.assertEqual(m.reference, "ref.png")
 
-    def test_fov_quality_metric(self):
+    def test_fov_quality_metric(self) -> None:
         """FOV-quality metric carries the evaluation + type tags."""
         m = qc.build_fov_quality_metric("plane_0", "combined.png")
         self.assertEqual(m.tags["evaluation"], "FOV Quality")
         self.assertEqual(m.tags["type"], "Operational QC")
 
-    def test_pending_status(self):
+    def test_pending_status(self) -> None:
         """The default status history entry is PENDING."""
         self.assertEqual(qc.pending_qc_status().status, Status.PENDING)
 
-    def test_dropdowns_ship_empty_so_review_is_requested(self):
+    def test_dropdowns_ship_empty_so_review_is_requested(self) -> None:
         """Both dropdowns leave the value unset.
 
         qcportal treats "" as pending; a preselected option renders as
@@ -50,7 +50,7 @@ class TestQCMetrics(unittest.TestCase):
 class TestQualityControlCollector(unittest.TestCase):
     """build_quality_control + write round-trip."""
 
-    def test_build_and_write(self):
+    def test_build_and_write(self) -> None:
         """Metrics collect into a QualityControl that re-validates."""
         d = Path(tempfile.mkdtemp())
         metrics = [

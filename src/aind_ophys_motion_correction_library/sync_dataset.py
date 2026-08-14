@@ -1,12 +1,15 @@
 """Vendored Sync (.h5) dataset reader for hardware timing lines.
 
-Carried over verbatim from the capsule; excluded from the docstring gate
-as third-party-style vendored code.
+Carried over from the capsule with type hints added; excluded from the
+docstring gate as third-party-style vendored code.
 """
 
 import datetime
 import warnings
 from functools import lru_cache
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Dict, List, Optional, Type, Union
 
 import h5py as h5
 import numpy as np
@@ -15,7 +18,7 @@ warnings.simplefilter("ignore")  # ignore h5py warnings
 
 
 @lru_cache(maxsize=32)
-def get_bit(uint_array, bit):
+def get_bit(uint_array: np.ndarray, bit: int) -> np.ndarray:
     """
     Returns a bool array for a specific bit in a uint ndarray.
 
@@ -35,12 +38,12 @@ class Sync(object):
     Sync Data Object
     """
 
-    def __init__(self, path):
+    def __init__(self, path: Union[str, Path]) -> None:
         self._data = h5.File(path, "r")
         self._meta_data = {}
 
     @property
-    def meta_data(self):
+    def meta_data(self) -> Dict[str, Any]:
         if not self._meta_data:
             self._meta_data = eval(self._data["meta"][()])
             self.meta_data["start_time"] = datetime.datetime.fromisoformat(
@@ -55,11 +58,11 @@ class Sync(object):
         return self._meta_data
 
     @property
-    def line_labels(self):
+    def line_labels(self) -> List[str]:
         return self.meta_data["line_labels"]
 
     @property
-    def timestamps(self):
+    def timestamps(self) -> np.ndarray:
         times = self.get_all_events()[:, 0:1].astype(np.int64)
         intervals = np.ediff1d(times, to_begin=0)
         rollovers = np.where(intervals < 0)[0]
@@ -68,42 +71,42 @@ class Sync(object):
         return times
 
     @property
-    def sample_freq(self):
+    def sample_freq(self) -> float:
         try:
             return float(self.meta_data["ni_daq"]["sample_freq"])
         except KeyError:
             return float(self.meta_data["ni_daq"]["counter_output_freq"])
 
     @lru_cache(maxsize=32)
-    def get_bit(self, bit):
+    def get_bit(self, bit: int) -> np.ndarray:
         return self.bit(bit)
 
     @lru_cache(maxsize=32)
-    def get_first_bit(self, line):
+    def get_first_bit(self, line: int) -> np.integer:
         value = self._data["data"][0][0]
         return value & 2**line
 
-    def bit(self, bit):
+    def bit(self, bit: int) -> np.ndarray:
         return (
             np.bitwise_and(self.get_all_bits(), 2**bit)
             .astype(bool)
             .astype(np.uint8)
         )
 
-    def line(self, line):
+    def line(self, line: Union[int, str]) -> np.ndarray:
         """
         Returns the values for a specific line.
 
         Parameters
         ----------
-        line : str
-            Line to return.
+        line : int or str
+            Line name, or bit index, to return.
 
         """
         bit = self._line_to_bit(line)
         return self.get_bit(bit)
 
-    def get_bit_changes(self, bit):
+    def get_bit_changes(self, bit: int) -> np.ndarray:
         """
         Returns the first derivative of a specific bit.
             Data points are 1 on rising edges and 255 on falling edges.
@@ -117,28 +120,28 @@ class Sync(object):
         bit_array = self.get_bit(bit)
         return np.ediff1d(bit_array, to_begin=0)
 
-    def get_line_changes(self, line):
+    def get_line_changes(self, line: Union[int, str]) -> np.ndarray:
         """
         Returns the first derivative of a specific line.
             Data points are 1 on rising edges and 255 on falling edges.
 
-        Parametersmmm
+        Parameters
         ----------
-        line : (str)
-            Line name for which to return changes.
+        line : int or str
+            Line name, or bit index, for which to return changes.
 
         """
         bit = self._line_to_bit(line)
         return self.get_bit_changes(bit)
 
-    def get_all_bits(self):
+    def get_all_bits(self) -> np.ndarray:
         """
         Returns the data for all bits.
 
         """
         return self._data["data"][()][:, -1]
 
-    def get_all_times(self, units="samples"):
+    def get_all_times(self, units: str = "samples") -> np.ndarray:
         """
         Returns all counter values.
 
@@ -151,7 +154,9 @@ class Sync(object):
         if self.meta_data["ni_daq"]["counter_bits"] == 32:
             times = self.get_all_events()[:, 0]
         else:
-            times = self.times
+            # timestamps un-wraps a narrower rolling counter. Flattened so both
+            # branches return 1-D, which the edge-finding callers index into.
+            times = self.timestamps[:, 0]
         units = units.lower()
         if units == "samples":
             return times
@@ -161,10 +166,9 @@ class Sync(object):
         else:
             raise ValueError("Only 'samples' or 'seconds' are valid units.")
 
-    # @lru_cache(maxsize=32)
-    def get_all_events(self, units="samples"):
+    def get_all_events(self, units: str = "samples") -> np.ndarray:
         """
-        Returns all counter values and their cooresponding IO state.
+        Returns all counter values and their corresponding IO state.
         """
         if units == "samples":
             return self._data["data"][()]
@@ -172,7 +176,9 @@ class Sync(object):
             return self._data["data"][()] / self.sample_freq
 
     @lru_cache(maxsize=32)
-    def get_events_by_bit(self, bit, units="samples"):
+    def get_events_by_bit(
+        self, bit: int, units: str = "samples"
+    ) -> np.ndarray:
         """
         Returns all counter values for transitions (both rising and falling)
             for a specific bit.
@@ -187,29 +193,31 @@ class Sync(object):
         return self.get_all_times(units)[np.where(changes != 0)]
 
     @lru_cache(maxsize=32)
-    def get_events_by_line(self, line, units="samples"):
+    def get_events_by_line(
+        self, line: Union[int, str], units: str = "samples"
+    ) -> np.ndarray:
         """
         Returns all counter values for transitions (both rising and falling)
             for a specific line.
 
         Parameters
         ----------
-        line : str
-            Line for which to return events.
+        line : int or str
+            Line name, or bit index, for which to return events.
 
         """
         line = self._line_to_bit(line)
         return self.get_events_by_bit(line, units)
 
-    def _line_to_bit(self, line):
+    def _line_to_bit(self, line: Union[int, str]) -> int:
         """
         Returns the bit for a specified line.  Either line name and number is
             accepted.
 
         Parameters
         ----------
-        line : str
-            Line name for which to return corresponding bit.
+        line : int or str
+            Line name, or bit index, for which to return the bit.
 
         """
         if type(line) is int:
@@ -219,7 +227,7 @@ class Sync(object):
         else:
             raise TypeError("Incorrect line type.  Try a str or int.")
 
-    def _bit_to_line(self, bit):
+    def _bit_to_line(self, bit: int) -> str:
         """
         Returns the line name for a specified bit.
 
@@ -230,30 +238,32 @@ class Sync(object):
         """
         return self.line_labels[bit]
 
-    def get_rising_edges(self, line, units="samples"):
+    def get_rising_edges(
+        self, line: Union[int, str], units: str = "samples"
+    ) -> np.ndarray:
         """
-        Returns the counter values for the rizing edges for a specific bit or
-            line.
+        Returns the counter values for the rising edges of a bit or line.
 
         Parameters
         ----------
-        line : str
-            Line for which to return edges.
+        line : int or str
+            Line name, or bit index, for which to return edges.
 
         """
         bit = self._line_to_bit(line)
         changes = self.get_bit_changes(bit)
         return self.get_all_times(units)[np.where(changes == 1)]
 
-    def get_falling_edges(self, line, units="samples"):
+    def get_falling_edges(
+        self, line: Union[int, str], units: str = "samples"
+    ) -> np.ndarray:
         """
-        Returns the counter values for the falling edges for a specific bit
-            or line.
+        Returns the counter values for the falling edges of a bit or line.
 
         Parameters
         ----------
-        line : str
-            Line for which to return edges.
+        line : int or str
+            Line name, or bit index, for which to return edges.
 
         """
         bit = self._line_to_bit(line)
@@ -262,13 +272,13 @@ class Sync(object):
 
     def get_nearest(
         self,
-        source,
-        target,
-        source_edge="rising",
-        target_edge="rising",
-        direction="previous",
-        units="indices",
-    ):
+        source: str,
+        target: str,
+        source_edge: str = "rising",
+        target_edge: str = "rising",
+        direction: str = "previous",
+        units: str = "indices",
+    ) -> np.ndarray:
         """
         For all values of the source line, finds the nearest edge from the
             target line.
@@ -276,8 +286,8 @@ class Sync(object):
         By default, returns the indices of the target edges.
 
         Args:
-            source (str, int): desired source line
-            target (str, int): desired target line
+            source (str): desired source line name, lowercased before use
+            target (str): desired target line name, lowercased before use
             source_edge [Optional(str)]: "rising" or "falling" source edges
             target_edge [Optional(str): "rising" or "falling" target edges
             direction (str): "previous" or "next". Whether to prefer the
@@ -308,7 +318,9 @@ class Sync(object):
             )
 
     @lru_cache(maxsize=32)
-    def line_stats(self, line, print_results=False):
+    def line_stats(
+        self, line: Union[int, str], print_results: bool = False
+    ) -> Dict[str, Any]:
         """
         Quick-and-dirty analysis of a bit.
 
@@ -352,10 +364,11 @@ class Sync(object):
                 print("*" * 70)
             return {
                 "line": line,
+                "bit": bit,
                 "total_rising": total_rising,
                 "total_falling": total_falling,
                 "avg_freq": None,
-                # "duty_cycle": None,
+                "duty_cycle": None,
             }
         else:
             # period
@@ -404,7 +417,9 @@ class Sync(object):
                 "duty_cycle": duty_cycle,
             }
 
-    def period(self, line, edge="rising"):
+    def period(
+        self, line: Union[int, str], edge: str = "rising"
+    ) -> Dict[str, float]:
         """
         Returns a dictionary with avg, min, max, and st of period for a line.
         """
@@ -432,7 +447,9 @@ class Sync(object):
             "sd": period_sd,
         }
 
-    def frequency(self, line, edge="rising"):
+    def frequency(
+        self, line: Union[int, str], edge: str = "rising"
+    ) -> float:
         """
         Returns the average frequency of a line.
         """
@@ -440,12 +457,9 @@ class Sync(object):
         period = self.period(line, edge)
         return 1.0 / period["avg"]
 
-    def duty_cycle(self, line):
+    def duty_cycle(self, line: Union[int, str]) -> float:
         """
-        Doesn't work right now.  Freezes python for some reason.
-
         Returns the duty cycle of a line.
-
         """
         bit = self._line_to_bit(line)
 
@@ -466,17 +480,19 @@ class Sync(object):
             # line starts low
             high = falling - rising
         else:
-            # line starts high
-            high = np.concatenate(
-                falling, self.get_all_events()[-1, 0]
-            ) - np.concatenate(0, rising)
+            # Line starts high, so the first high run begins at sample 0 and
+            # the last one ends at the final sample.
+            last_sample = self.get_all_events()[-1, 0]
+            high = np.concatenate([falling, [last_sample]]) - np.concatenate(
+                [[0], rising]
+            )
 
         total_high_time = np.sum(high)
         all_events = self.get_events_by_bit(bit)
         total_time = all_events[-1] - all_events[0]
         return 1.0 * total_high_time / total_time
 
-    def stats(self):
+    def stats(self) -> List[Dict[str, Any]]:
         """
         Quick-and-dirty analysis of all bits.  Prints a few things about each
             bit where events are found.
@@ -484,7 +500,7 @@ class Sync(object):
         bits = []
         for i in range(32):
             bits.append(self.line_stats(i, print_results=False))
-        active_bits = [x for x in bits if x is not None]
+        active_bits = [x for x in bits if "total_rising" in x]
         print("Active bits: ", len(active_bits))
         for bit in active_bits:
             print("*" * 70)
@@ -497,25 +513,30 @@ class Sync(object):
         print("*" * 70)
         return active_bits
 
-    def close(self):
+    def close(self) -> None:
         """
         Closes the dataset.
         """
         self._data.close()
 
-    def __enter__(self):
+    def __enter__(self) -> "Sync":
         """
         So we can use context manager (with...as) like any other open file.
 
         Examples
         --------
-        >>> with Dataset('my_data.h5') as d:
+        >>> with Sync('my_data.h5') as d:
         ...     d.stats()
 
         """
         return self
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(
+        self,
+        type: Optional[Type[BaseException]],
+        value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> None:
         """
         Exit statement for context manager.
         """

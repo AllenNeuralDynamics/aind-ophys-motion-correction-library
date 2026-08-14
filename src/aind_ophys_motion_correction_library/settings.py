@@ -6,7 +6,7 @@ and free of aind-data-schema / suite2p side effects.
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Union
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
@@ -214,7 +214,7 @@ class MotionCorrectionSettings(BaseSettings, cli_parse_args=True):
 
     @field_validator("block_size", mode="before")
     @classmethod
-    def _coerce_block_size(cls, value):
+    def _coerce_block_size(cls, value: Union[str, list]) -> List[int]:
         """Coerce a CLI/env block_size to a list of ints.
 
         Accepts a JSON string (``"[128, 128]"``) or a list whose elements

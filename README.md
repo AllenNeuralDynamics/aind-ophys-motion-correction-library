@@ -1,6 +1,3 @@
-# DEPRECATION NOTICE!
-We are deprecating aind-ophys-motion-correction-library repository.  Please use the new [python library template](https://github.com/AllenNeuralDynamics/python-templates) that conforms to the latest coding standards.
-
 # aind-ophys-motion-correction-library
 
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
@@ -10,30 +7,90 @@ We are deprecating aind-ophys-motion-correction-library repository.  Please use 
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 ![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
 
+Suite2P-based motion correction for AIND optical physiology, with
+`aind-data-schema` v2 metadata I/O.
+
+This is the backing library for the `aind-ophys-motion-correction` Code Ocean
+capsule. The capsule is a thin wrapper that calls `job.run()`; all logic,
+tests and dependency pins live here.
+
 ## Usage
- - To use this template, click the green `Use this template` button and `Create new repository`.
- - After github initially creates the new repository, please wait an extra minute for the initialization scripts to finish organizing the repo.
- - To enable the automatic semantic version increments: in the repository go to `Settings` and `Collaborators and teams`. Click the green `Add people` button. Add `svc-aindscicomp` as a collaborator with "write" role. Modify the file in `.github/workflows/tag_and_publish.yml` by removing the if statement in line 67. The semantic version will now be incremented every time a code is committed into the main branch.
- - To publish to PyPI, first submit a request to the [Scientific Computing issue tracker](https://github.com/AllenNeuralDynamics/aind-scientific-computing/issues)
- to have the repository added as a Trusted Publisher for PyPI. Please specify the repository name (and desired PyPI package name if different).
- After the repository is added as a Trusted Publisher, enable semantic versioning and remove the if statement in line 73 in `.github/workflows/tag_and_publish.yml`. The code will now be published to PyPI every time the code is committed into the main branch.
- - The `.github/workflows/test_and_lint.yml` file will run automated tests and style checks every time a Pull Request is opened. If the checks are undesired, the `test_and_lint.yml` can be deleted. The strictness of the code coverage level, etc., can be modified by altering the configurations in the `pyproject.toml` file and the `.flake8` file.
- - Please make any necessary updates to the README.md and CITATION.cff files
 
-## Level of Support
-Please indicate a level of support:
- - [ ] Supported: We are releasing this code to the public as a tool we expect others to use. Issues are welcomed, and we expect to address them promptly; pull requests will be vetted by our staff before inclusion.
- - [ ] Occasional updates: We are planning on occasional updating this tool with no fixed schedule. Community involvement is encouraged through both issues and pull requests.
- - [ ] Unsupported: We are not currently supporting this code, but simply releasing it to the community AS IS but are not able to provide any guarantees of support. The community is welcome to submit issues, but you should not expect an active response.
+```python
+from aind_ophys_motion_correction_library.job import run
 
-## Release Status
-GitHub's tags and Release features can be used to indicate a Release status.
+run()  # settings come from CLI args / environment
+```
 
- - Stable: v1.0.0 and above. Ready for production.
- - Beta:  v0.x.x or indicated in the tag. Ready for beta testers and early adopters.
- - Alpha: v0.x.x or indicated in the tag. Still in early development.
+`run()` reads the acquisition metadata (schema v1 `session.json` or v2
+`acquisition.json`), resolves which plane this task holds, registers the movie
+with Suite2P, and writes the outputs plus a full `processing.json` and
+`quality_control.json`.
+
+## Modules
+
+### `job.py`
+
+Orchestration. `run()` is the entry point: metadata read, logging setup, plane
+identity, Suite2P registration, output writing, and the `processing.json` /
+`quality_control.json` emission (via the shared `stage_guard`).
+
+### `registration.py`
+
+Suite2P algorithm and per-plane data preparation: reference-image creation
+(`compute_reference`), empty-frame detection
+(`find_movie_start_end_empty_frames`), outlier clipping
+(`identify_and_clip_outliers`), projections (`projection_process`), summary
+plots (`make_png`, `make_nonrigid_png`, `flow_png`), registration metrics
+(`compute_crispness`, `compute_residual_optical_flow`), and the input
+discovery helpers (`find_multiplane_input`, `find_singleplane_input`,
+`singleplane_motion_correction`, `truncate_for_debug`).
+
+### `settings.py`
+
+`MotionCorrectionSettings` — the pydantic-settings model behind the CLI, the
+environment (`MOTION_CORRECTION_` prefix) and the Code Ocean app panel.
+
+### `qc.py`
+
+Capsule-specific QC metric content (`build_registration_summary_metric`,
+`build_fov_quality_metric`) over the shared `aind_pophys_metadata` builders.
+One `quality_control.json` is written per plane.
+
+### `sync_dataset.py`
+
+Vendored `Sync` reader for sync `.h5` files, used only as a last-resort frame
+rate source.
+
+### `utils/metadata_utils.py`
+
+The `MotionCorrectionMetadata` view over v1/v2 metadata
+(`load_motion_correction_metadata`), canonical plane-id resolution
+(`resolve_plane_id`), the Bergamo conditioning-epoch TIFF stem
+(`bci_epoch_tiff_stem`), and the `Code` block (`build_code`).
+
+## Outputs
+
+Written into `<results>/<plane_id>/motion_correction/`, each named after the
+plane basename:
+
+| File | Contents |
+|---|---|
+| `*_registered.h5` | registered movie, `ref_image`, run `metadata`, `reg_metrics` |
+| `*_motion_transform.csv` | per-frame x/y offsets, correlation, validity, and per-block columns when nonrigid |
+| `*_maximum_projection.png` | max projection |
+| `*_average_projection.png` | average projection |
+| `*_registration_summary.png` | projections plus offset/correlation traces (`*_nonrigid` variant when nonrigid) |
+| `*_motion_preview.webm` | raw-vs-registered preview movie |
+| `processing.json` | full `Processing` document for this plane |
+| `quality_control.json` | full `QualityControl` document for this plane |
+
+Bergamo single-plane runs additionally write `trial_locations.json` and
+`epoch_locations.json`. `flow_png` writes `*_PC<n>low/high/rof.png` beside the
+registration summary when registration principal components are available.
 
 ## Installation
+
 To use the software, in the root directory, run
 ```bash
 pip install -e .
@@ -49,3 +106,20 @@ Alternatively, if using [uv](https://docs.astral.sh/uv/), run
 ```bash
 uv sync
 ```
+
+## Tests and linters
+
+Tests are `unittest`. The CI gate is:
+```bash
+uv run flake8 . && uv run interrogate --verbose .
+uv run coverage run -m unittest discover && uv run coverage report
+```
+Coverage is gated at 85%; `registration.py`, `job.py` and `sync_dataset.py` are
+omitted, since they are exercised by the Code Ocean data run rather than by
+local unit tests.
+
+## Level of Support
+We are not currently supporting this code, but simply releasing it to the
+community AS IS but are not able to provide any guarantees of support. The
+community is welcome to submit issues, but you should not expect an active
+response.

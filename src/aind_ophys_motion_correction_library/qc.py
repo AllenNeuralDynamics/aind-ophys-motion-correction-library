@@ -71,7 +71,7 @@ def build_fov_quality_metric(
     unique_id : str
         Plane/FOV id used in the metric name.
     reference_filepath : str
-        Path to the combined projection image, relative to the asset.
+        Path to the max-projection image, relative to the asset.
 
     Returns
     -------
