@@ -106,7 +106,7 @@ requires-dist = [
     { name = "aind-ophys-utils" },
     { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=adac8ebee57f895bb2d30b69cde01dd41afbce10" },
     { name = "h5py" },
-    { name = "log-schema", extras = ["cloudwatch"], git = "https://github.com/AllenNeuralDynamics/aind-log-utils.git?subdirectory=python&rev=f09685e" },
+    { name = "log-schema", extras = ["cloudwatch"], git = "https://github.com/AllenNeuralDynamics/log-schema.git?subdirectory=python&rev=f09685e" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
@@ -1234,7 +1234,7 @@ wheels = [
 [[package]]
 name = "log-schema"
 version = "0.2.9"
-source = { git = "https://github.com/AllenNeuralDynamics/aind-log-utils.git?subdirectory=python&rev=f09685e#f09685e8b6f4228d0dd37e867b52de0286fffccb" }
+source = { git = "https://github.com/AllenNeuralDynamics/log-schema.git?subdirectory=python&rev=f09685e#f09685e8b6f4228d0dd37e867b52de0286fffccb" }
 dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
