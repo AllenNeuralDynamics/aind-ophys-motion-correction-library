@@ -104,7 +104,7 @@ requires-dist = [
     { name = "aind-data-schema", specifier = "==2.9.0" },
     { name = "aind-data-schema-models", specifier = "==6.2.0" },
     { name = "aind-ophys-utils" },
-    { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=3a528fd7cdf12a94f8004cf187b2ad80a15b7209" },
+    { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=c4dd525f6058c967a5c22b7df870047578f93c1f" },
     { name = "h5py" },
     { name = "log-schema", extras = ["cloudwatch"], git = "https://github.com/AllenNeuralDynamics/log-schema.git?subdirectory=python&rev=f09685e" },
     { name = "matplotlib" },
@@ -163,7 +163,7 @@ wheels = [
 [[package]]
 name = "aind-pophys-metadata"
 version = "0.1.0"
-source = { git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=3a528fd7cdf12a94f8004cf187b2ad80a15b7209#3a528fd7cdf12a94f8004cf187b2ad80a15b7209" }
+source = { git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=c4dd525f6058c967a5c22b7df870047578f93c1f#c4dd525f6058c967a5c22b7df870047578f93c1f" }
 dependencies = [
     { name = "aind-data-schema" },
     { name = "aind-data-schema-models" },
