@@ -1,10 +1,11 @@
-"""Tests for the metadata-driven parts of the registration module.
+"""Tests for the metadata-driven helpers in the registration module.
 
 Covers the per-plane output directories motion correction creates (every
-downstream capsule keys on them), the v2 compute paths (frame rate and
-plane ids read from ``acquisition.json``), the debug-truncation logging,
-and Bergamo single-plane input discovery, where the movie is named after
-the plane id rather than the session.
+downstream capsule keys on them), the v2 frame-rate read off
+``acquisition.json``, the debug-truncation logging, and single-plane input
+discovery, where the movie is named after the plane id rather than the
+session. The ``run()`` orchestration that calls these helpers is tested in
+``test_job``.
 """
 
 import json
@@ -12,13 +13,11 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 import h5py
 import numpy as np
 from aind_pophys_metadata import CoreMetadata
 
-from aind_ophys_motion_correction_library import job
 from aind_ophys_motion_correction_library import registration as reg
 from aind_ophys_motion_correction_library.utils import (
     metadata_utils as mu,
@@ -38,6 +37,36 @@ def _v2_multiplane_dir() -> Path:
     """
     directory = Path(tempfile.mkdtemp())
     shutil.copy(V2_MULTIPLANE, directory / "acquisition.json")
+    return directory
+
+
+def _staged_bergamo_directory() -> Path:
+    """A directory shaped like the real Bergamo converter's output.
+
+    The converter writes its stitched movie to ``<plane_id>/<plane_id>.h5``
+    (e.g. ``plane_0/plane_0.h5``), named after the plane id -- not the
+    session, even though the session name is a distinct, plausible-looking
+    value of its own.
+
+    Returns
+    -------
+    Path
+        Directory containing ``acquisition.json``, ``data_description.json``
+        and the plane-id-named movie.
+    """
+    directory = Path(tempfile.mkdtemp())
+    shutil.copy(
+        RESOURCES / "acquisition_bergamo_v2.json",
+        directory / "acquisition.json",
+    )
+    (directory / "data_description.json").write_text(
+        json.dumps(
+            {"name": "single-plane-ophys_772414_2025-04-11_17-41-16"}
+        )
+    )
+    plane_dir = directory / "plane_0"
+    plane_dir.mkdir()
+    (plane_dir / "plane_0.h5").touch()
     return directory
 
 
@@ -73,60 +102,8 @@ class TestPlaneOutputDirectories(unittest.TestCase):
         self.assertEqual(len({metadata.dataset_name}), 1)
 
 
-def _staged_bergamo_directory() -> Path:
-    """A directory shaped like the real Bergamo converter's output.
-
-    The converter writes its stitched movie to ``<plane_id>/<plane_id>.h5``
-    (e.g. ``plane_0/plane_0.h5``), named after the plane id -- not the
-    session, even though the session name is a distinct, plausible-looking
-    value of its own.
-
-    Returns
-    -------
-    Path
-        Directory containing ``acquisition.json``, ``data_description.json``
-        and the plane-id-named movie.
-    """
-    directory = Path(tempfile.mkdtemp())
-    shutil.copy(
-        RESOURCES / "acquisition_bergamo_v2.json",
-        directory / "acquisition.json",
-    )
-    (directory / "data_description.json").write_text(
-        json.dumps(
-            {"name": "single-plane-ophys_772414_2025-04-11_17-41-16"}
-        )
-    )
-    plane_dir = directory / "plane_0"
-    plane_dir.mkdir()
-    (plane_dir / "plane_0.h5").touch()
-    return directory
-
-
-class TestBergamoSingleplaneDiscovery(unittest.TestCase):
-    """The converter names the movie after the plane id, not the session.
-
-    The converter writes its stitched movie to ``<plane_id>/<plane_id>.h5``;
-    the plane id, not the session name, is what appears in the path, so
-    discovery keys on the plane id.
-    """
-
-    def test_resolves_the_plane_id_named_movie(self) -> None:
-        """job._resolve_plane_input finds plane_0/plane_0.h5."""
-        directory = _staged_bergamo_directory()
-        metadata = mu.load_motion_correction_metadata(directory)
-        core = CoreMetadata.load(directory)
-        settings = SimpleNamespace(
-            input_dir=directory,
-            output_dir=Path(tempfile.mkdtemp()),
-            data_type="h5",
-            frame_rate=None,
-        )
-        ctx = job._resolve_plane_input(settings, metadata, core)
-        self.assertEqual(ctx["unique_id"], "plane_0")
-        self.assertEqual(
-            ctx["input_file"], directory / "plane_0" / "plane_0.h5"
-        )
+class TestFindSingleplaneInput(unittest.TestCase):
+    """Bergamo input is found by the converter's plane-id-named layout."""
 
     def test_dataset_name_selector_would_not_have_found_it(self) -> None:
         """A session-name selector finds nothing under the converter's
@@ -139,38 +116,6 @@ class TestBergamoSingleplaneDiscovery(unittest.TestCase):
                 "plane_0",
                 "single-plane-ophys_772414_2025-04-11_17-41-16",
             )
-
-
-class TestMultiplanePlaneResolution(unittest.TestCase):
-    """The multiplane task takes its plane id from the input directory.
-
-    The per-plane id must come from the movie's own layout, not from the
-    session-level ``dataset_name`` (identical across every plane), because it
-    names this task's output directory and the aggregator ``DataProcess``.
-    """
-
-    def test_unique_id_comes_from_the_plane_directory(self) -> None:
-        """job._resolve_plane_input keys on the V*-named plane directory."""
-        directory = _v2_multiplane_dir()
-        (directory / "data_description.json").write_text(
-            json.dumps({"name": "multiplane_session"})
-        )
-        plane_dir = directory / "VISp_0"
-        plane_dir.mkdir()
-        movie = plane_dir / "VISp_0.h5"
-        movie.touch()
-        metadata = mu.load_motion_correction_metadata(directory)
-        core = CoreMetadata.load(directory)
-        settings = SimpleNamespace(
-            input_dir=directory,
-            output_dir=Path(tempfile.mkdtemp()),
-            data_type="h5",
-            frame_rate=None,
-        )
-        ctx = job._resolve_plane_input(settings, metadata, core)
-        self.assertEqual(ctx["unique_id"], "VISp_0")
-        self.assertNotEqual(ctx["unique_id"], metadata.dataset_name)
-        self.assertEqual(ctx["input_file"], movie)
 
 
 class TestMultiplaneFrameRate(unittest.TestCase):

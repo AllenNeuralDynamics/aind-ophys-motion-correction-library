@@ -177,6 +177,7 @@ def _prepare_movie(
             ctx["output_dir"],
             core,
             debug=settings.debug,
+            scratch_dir=settings.tmp_dir,
         )
         ctx["input_file"] = input_file
         ctx["reference_image_fp"] = reference_image_fp
@@ -185,6 +186,7 @@ def _prepare_movie(
             Path(ctx["input_file"]),
             ctx["unique_id"],
             ctx["frame_rate_hz"],
+            scratch_dir=settings.tmp_dir,
         )
 
 

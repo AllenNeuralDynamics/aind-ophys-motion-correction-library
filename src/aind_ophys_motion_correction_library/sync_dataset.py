@@ -4,6 +4,7 @@ Carried over from the capsule with type hints added; excluded from the
 docstring gate as third-party-style vendored code.
 """
 
+import ast
 import datetime
 import warnings
 from functools import lru_cache
@@ -45,7 +46,7 @@ class Sync(object):
     @property
     def meta_data(self) -> Dict[str, Any]:
         if not self._meta_data:
-            self._meta_data = eval(self._data["meta"][()])
+            self._meta_data = ast.literal_eval(self._data["meta"][()])
             self.meta_data["start_time"] = datetime.datetime.fromisoformat(
                 self.meta_data["start_time"]
             )
@@ -150,6 +151,10 @@ class Sync(object):
         units : str
             Return times in 'samples' or 'seconds'
 
+        Raises
+        ------
+        ValueError
+            If ``units`` is neither 'samples' nor 'seconds'.
         """
         if self.meta_data["ni_daq"]["counter_bits"] == 32:
             times = self.get_all_events()[:, 0]
@@ -219,6 +224,10 @@ class Sync(object):
         line : int or str
             Line name, or bit index, for which to return the bit.
 
+        Raises
+        ------
+        TypeError
+            If ``line`` is neither an int nor a str.
         """
         if type(line) is int:
             return line
@@ -293,6 +302,9 @@ class Sync(object):
             direction (str): "previous" or "next". Whether to prefer the
                 previous edge or the following edge.
             units (str): "indices"
+
+        Raises:
+            KeyError: if units is not "indices", "samples" or "seconds".
 
         """
         source_edges = getattr(
@@ -422,6 +434,11 @@ class Sync(object):
     ) -> Dict[str, float]:
         """
         Returns a dictionary with avg, min, max, and st of period for a line.
+
+        Raises
+        ------
+        IndexError
+            If the line has too few edges to compute a period.
         """
         bit = self._line_to_bit(line)
 

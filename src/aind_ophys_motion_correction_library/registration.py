@@ -60,7 +60,7 @@ DEBUG_DURATION_S = 360.0
 DEBUG_SINGLEPLANE_FRAMES = 5000
 
 # Writable scratch directory for the debug-truncated and virtual movies.
-SCRATCH_DIR = Path("../scratch")
+SCRATCH_DIR = Path("/scratch")
 
 
 def is_S3(file_path: str) -> bool:
@@ -1584,10 +1584,17 @@ def find_multiplane_input(data_dir: Path) -> Tuple[Path, str]:
     """
     data_dir = Path(data_dir)
     pattern = re.compile(r"^V.*\d+$")
-    matching_files = [
+    matching_files = sorted(
         d for d in data_dir.rglob("*.txt") if pattern.match(d.stem)
-    ]
+    )
     if matching_files:
+        if len(matching_files) > 1:
+            logger.warning(
+                "%d plane sidecar files under %s; using %s.",
+                len(matching_files),
+                data_dir,
+                matching_files[0],
+            )
         with open(matching_files[0], "r") as f:
             h5_name = f.read()
         h5_file = find_one(data_dir, h5_name)
@@ -1907,11 +1914,21 @@ def find_singleplane_input(
     """
     h5_file = Path(data_dir)
     if not h5_file.is_file():
-        matches = [f for f in h5_file.rglob("*.h5") if selector in str(f)]
+        matches = sorted(
+            f for f in h5_file.rglob("*.h5") if selector in str(f)
+        )
         if not matches:
             raise FileNotFoundError(
                 f"No '*.h5' movie whose path contains {selector!r} found "
                 f"under {data_dir}"
+            )
+        if len(matches) > 1:
+            logger.warning(
+                "%d movies contain %r under %s; using %s.",
+                len(matches),
+                selector,
+                data_dir,
+                matches[0],
             )
         h5_file = matches[0]
     return h5_file, make_output_directory(output_dir, plane_id)

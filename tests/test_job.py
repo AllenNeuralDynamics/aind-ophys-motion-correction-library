@@ -1,24 +1,30 @@
-"""Tests for the writers that consume the Suite2P registration result.
+"""Tests for the job entrypoint: plane resolution and the output writers.
 
-Every fixture here is built from the type Suite2P actually hands back - a
-numpy movie, numpy offset/correlation arrays, per-block nonrigid arrays and a
-numpy ops dict - at realistic shapes. These writers index, format and
-serialize those arrays, so a list-shaped stand-in exercises different code
-than a real run does.
+Plane resolution turns an input directory into this task's movie and its
+canonical plane id. The writers consume the type Suite2P actually hands back
+- a numpy movie, numpy offset/correlation arrays, per-block nonrigid arrays
+and a numpy ops dict - at realistic shapes, so a list-shaped stand-in would
+exercise different code than a real run does.
 """
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
 import pandas as pd
 import suite2p
+from aind_pophys_metadata import CoreMetadata
 
 from aind_ophys_motion_correction_library import job
 from aind_ophys_motion_correction_library import registration as reg
+from aind_ophys_motion_correction_library.utils import (
+    metadata_utils as mu,
+)
 
 # Small but real: a movie shape Suite2P would produce, kept short so the
 # writers run in milliseconds.
@@ -26,6 +32,50 @@ N_FRAMES = 50
 FRAME_HEIGHT = 512
 FRAME_WIDTH = 512
 N_BLOCKS = 9
+
+RESOURCES = Path(__file__).parent / "resources"
+V2_MULTIPLANE = RESOURCES / "acquisition_multiplane_v2.json"
+
+
+def _v2_multiplane_dir() -> Path:
+    """Stage the real v2 multiplane acquisition in a temp directory.
+
+    Returns
+    -------
+    Path
+        Directory containing ``acquisition.json``.
+    """
+    directory = Path(tempfile.mkdtemp())
+    shutil.copy(V2_MULTIPLANE, directory / "acquisition.json")
+    return directory
+
+
+def _staged_bergamo_directory() -> Path:
+    """A directory shaped like the real Bergamo converter's output.
+
+    The converter writes its stitched movie to ``<plane_id>/<plane_id>.h5``
+    (e.g. ``plane_0/plane_0.h5``), named after the plane id.
+
+    Returns
+    -------
+    Path
+        Directory containing ``acquisition.json``, ``data_description.json``
+        and the plane-id-named movie.
+    """
+    directory = Path(tempfile.mkdtemp())
+    shutil.copy(
+        RESOURCES / "acquisition_bergamo_v2.json",
+        directory / "acquisition.json",
+    )
+    (directory / "data_description.json").write_text(
+        json.dumps(
+            {"name": "single-plane-ophys_772414_2025-04-11_17-41-16"}
+        )
+    )
+    plane_dir = directory / "plane_0"
+    plane_dir.mkdir()
+    (plane_dir / "plane_0.h5").touch()
+    return directory
 
 
 def _ops(n_frames: int = N_FRAMES, nonrigid: bool = False) -> dict:
@@ -134,6 +184,55 @@ def _suite2p_args(nonrigid: bool = False) -> dict:
         (FRAME_HEIGHT, FRAME_WIDTH), dtype="int16"
     )
     return suite2p_args
+
+
+class TestJobPlaneResolution(unittest.TestCase):
+    """run() resolves this task's movie and its canonical plane id.
+
+    The plane id must come from the movie's own layout, not from the
+    session-level ``dataset_name`` (identical across every plane), because it
+    names this task's output directory and the aggregator ``DataProcess``.
+    """
+
+    def test_resolves_the_plane_id_named_movie(self) -> None:
+        """job._resolve_plane_input finds plane_0/plane_0.h5."""
+        directory = _staged_bergamo_directory()
+        metadata = mu.load_motion_correction_metadata(directory)
+        core = CoreMetadata.load(directory)
+        settings = SimpleNamespace(
+            input_dir=directory,
+            output_dir=Path(tempfile.mkdtemp()),
+            data_type="h5",
+            frame_rate=None,
+        )
+        ctx = job._resolve_plane_input(settings, metadata, core)
+        self.assertEqual(ctx["unique_id"], "plane_0")
+        self.assertEqual(
+            ctx["input_file"], directory / "plane_0" / "plane_0.h5"
+        )
+
+    def test_unique_id_comes_from_the_plane_directory(self) -> None:
+        """job._resolve_plane_input keys on the V*-named plane directory."""
+        directory = _v2_multiplane_dir()
+        (directory / "data_description.json").write_text(
+            json.dumps({"name": "multiplane_session"})
+        )
+        plane_dir = directory / "VISp_0"
+        plane_dir.mkdir()
+        movie = plane_dir / "VISp_0.h5"
+        movie.touch()
+        metadata = mu.load_motion_correction_metadata(directory)
+        core = CoreMetadata.load(directory)
+        settings = SimpleNamespace(
+            input_dir=directory,
+            output_dir=Path(tempfile.mkdtemp()),
+            data_type="h5",
+            frame_rate=None,
+        )
+        ctx = job._resolve_plane_input(settings, metadata, core)
+        self.assertEqual(ctx["unique_id"], "VISp_0")
+        self.assertNotEqual(ctx["unique_id"], metadata.dataset_name)
+        self.assertEqual(ctx["input_file"], movie)
 
 
 class TestRegistrationOutputParameters(unittest.TestCase):

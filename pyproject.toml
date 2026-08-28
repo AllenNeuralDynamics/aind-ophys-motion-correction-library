@@ -88,10 +88,11 @@ exclude = '''
 # Code Ocean data-run, not local unit tests; sync_dataset is vendored.
 [tool.coverage.run]
 omit = [
-    "*__init__*",
-    "*sync_dataset*",
-    "*registration.py",
-    "*job.py",
+    "*/aind_ophys_motion_correction_library/__init__.py",
+    "*/aind_ophys_motion_correction_library/utils/__init__.py",
+    "*/aind_ophys_motion_correction_library/sync_dataset.py",
+    "*/aind_ophys_motion_correction_library/registration.py",
+    "*/aind_ophys_motion_correction_library/job.py",
 ]
 source = ["aind_ophys_motion_correction_library", "tests"]
 
