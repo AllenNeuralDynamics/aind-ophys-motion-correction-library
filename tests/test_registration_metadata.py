@@ -1,12 +1,10 @@
 """Tests for the metadata-driven parts of the registration module.
 
-Four things are covered here, all of which used to be either wrong or
-invisible: the per-plane output directories this capsule creates (every
-downstream capsule keys on them), the v2 compute paths that previously
-raised a bare string or a bare ``KeyError``, the debug truncation that
-clipped a movie without logging anything, and Bergamo single-plane input
-discovery (the converter names its movie after the plane id, not the
-session -- a mismatch that only surfaced once a run reached this capsule).
+Covers the per-plane output directories motion correction creates (every
+downstream capsule keys on them), the v2 compute paths (frame rate and
+plane ids read from ``acquisition.json``), the debug-truncation logging,
+and Bergamo single-plane input discovery, where the movie is named after
+the plane id rather than the session.
 """
 
 import json
@@ -108,12 +106,9 @@ def _staged_bergamo_directory() -> Path:
 class TestBergamoSingleplaneDiscovery(unittest.TestCase):
     """The converter names the movie after the plane id, not the session.
 
-    A prior version of ``_resolve_plane_input`` searched for the movie by
-    ``dataset_name`` (the session name), which never appears anywhere in the
-    converter's actual output path -- every real Bergamo run reached this
-    capsule and failed with ``FileNotFoundError``. This was invisible until
-    a run finally went past the converter, because nothing exercised the
-    handoff between the two capsules before then.
+    The converter writes its stitched movie to ``<plane_id>/<plane_id>.h5``;
+    the plane id, not the session name, is what appears in the path, so
+    discovery keys on the plane id.
     """
 
     def test_resolves_the_plane_id_named_movie(self) -> None:
@@ -134,8 +129,8 @@ class TestBergamoSingleplaneDiscovery(unittest.TestCase):
         )
 
     def test_dataset_name_selector_would_not_have_found_it(self) -> None:
-        """Reproduces the bug directly: a session-name selector finds
-        nothing under the converter's actual plane-id-named layout."""
+        """A session-name selector finds nothing under the converter's
+        plane-id-named layout."""
         directory = _staged_bergamo_directory()
         with self.assertRaises(FileNotFoundError):
             reg.find_singleplane_input(
@@ -144,6 +139,38 @@ class TestBergamoSingleplaneDiscovery(unittest.TestCase):
                 "plane_0",
                 "single-plane-ophys_772414_2025-04-11_17-41-16",
             )
+
+
+class TestMultiplanePlaneResolution(unittest.TestCase):
+    """The multiplane task takes its plane id from the input directory.
+
+    The per-plane id must come from the movie's own layout, not from the
+    session-level ``dataset_name`` (identical across every plane), because it
+    names this task's output directory and the aggregator ``DataProcess``.
+    """
+
+    def test_unique_id_comes_from_the_plane_directory(self) -> None:
+        """job._resolve_plane_input keys on the V*-named plane directory."""
+        directory = _v2_multiplane_dir()
+        (directory / "data_description.json").write_text(
+            json.dumps({"name": "multiplane_session"})
+        )
+        plane_dir = directory / "VISp_0"
+        plane_dir.mkdir()
+        movie = plane_dir / "VISp_0.h5"
+        movie.touch()
+        metadata = mu.load_motion_correction_metadata(directory)
+        core = CoreMetadata.load(directory)
+        settings = SimpleNamespace(
+            input_dir=directory,
+            output_dir=Path(tempfile.mkdtemp()),
+            data_type="h5",
+            frame_rate=None,
+        )
+        ctx = job._resolve_plane_input(settings, metadata, core)
+        self.assertEqual(ctx["unique_id"], "VISp_0")
+        self.assertNotEqual(ctx["unique_id"], metadata.dataset_name)
+        self.assertEqual(ctx["input_file"], movie)
 
 
 class TestMultiplaneFrameRate(unittest.TestCase):

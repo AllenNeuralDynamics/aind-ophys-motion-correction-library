@@ -464,7 +464,9 @@ def _write_projections_and_previews(
         )
         encode_video(tiled, args["motion_correction_preview_output"], fps)
     except Exception:
-        logger.info("Could not write motion correction preview")
+        logger.warning(
+            "Could not write motion correction preview", exc_info=True
+        )
 
 
 def _write_reg_metrics(suite2p_args: dict, args: dict, reg_out: dict) -> None:

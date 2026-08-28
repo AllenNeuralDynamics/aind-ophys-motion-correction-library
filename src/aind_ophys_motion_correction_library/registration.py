@@ -1,8 +1,8 @@
 """Suite2P motion-correction algorithm and per-plane data preparation.
 
-Ported from the aind-ophys-motion-correction capsule. Pure computation and
-file I/O only; schema (processing.json) lives in ``utils.metadata_utils``,
-QC in ``qc``, settings in ``settings``, and orchestration in ``job``.
+Pure computation and file I/O only; schema (processing.json) lives in
+``utils.metadata_utils``, QC in ``qc``, settings in ``settings``, and
+orchestration in ``job``.
 """
 
 import json
@@ -268,6 +268,11 @@ def load_initial_frames(
         Frames selected from the input raw data linearly spaced in index of the
         time axis. If n_frames > tot_frames, a number of frames equal to
         tot_frames is returned.
+
+    Raises
+    ------
+    ValueError
+        If ``file_path`` is neither a string nor a list.
     """
     if isinstance(file_path, str):
         array = h5py_to_numpy(
@@ -312,14 +317,15 @@ def combine_images_with_individual_titles(
     -------
     None
     """
-    # Open both images
-    img1 = Image.open(image1_path)
-    img2 = Image.open(image2_path)
-
-    # Ensure both images have the same height
-    max_height = max(img1.height, img2.height)
-    img1 = img1.resize((img1.width, max_height), Image.Resampling.LANCZOS)
-    img2 = img2.resize((img2.width, max_height), Image.Resampling.LANCZOS)
+    # Resize both to a common height; the resized copies outlive the handles.
+    with Image.open(image1_path) as src1, Image.open(image2_path) as src2:
+        max_height = max(src1.height, src2.height)
+        img1 = src1.resize(
+            (src1.width, max_height), Image.Resampling.LANCZOS
+        )
+        img2 = src2.resize(
+            (src2.width, max_height), Image.Resampling.LANCZOS
+        )
 
     # Set padding and title height
     padding = 20
@@ -947,6 +953,10 @@ def check_and_warn_on_datatype(
     h5py_key : str
         Name of the dataset to check. Default is "".
 
+    Raises
+    ------
+    ValueError
+        If ``filetype`` is neither "h5" nor "tiff".
     """
     if filetype == "h5":
         byteorder, name = h5py_byteorder_name(filepath, h5py_key)
@@ -1139,6 +1149,10 @@ def projection_process(
     proj: np.ndarray
         nrows x ncols, uint8
 
+    Raises
+    ------
+    ValueError
+        If ``projection`` is neither "max" nor "avg".
     """
     if projection == "max":
         proj = np.max(data, axis=0)
@@ -1211,8 +1225,24 @@ def make_output_directory(output_dir: Path, plane: str = "") -> Path:
 
 
 def check_trim_frames(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Make sure that if the user sets auto_remove_empty_frames
-    and timing frames is already requested, raise an error.
+    """Reject a config that both auto-removes empty frames and trims manually.
+
+    Parameters
+    ----------
+    data : dict
+        Suite2p args carrying ``auto_remove_empty_frames`` and the
+        ``trim_frames_start``/``trim_frames_end`` counts.
+
+    Returns
+    -------
+    dict
+        The unchanged ``data``, when the settings are compatible.
+
+    Raises
+    ------
+    ValueError
+        If ``auto_remove_empty_frames`` is set alongside a nonzero
+        ``trim_frames_start`` or ``trim_frames_end``.
     """
     if data["auto_remove_empty_frames"] and (
         data["trim_frames_start"] > 0 or data["trim_frames_end"] > 0
@@ -1311,9 +1341,8 @@ def make_nonrigid_png(
     nonrigid_y = parse_block_column(summary_df["nonrigid_y"])
     nonrigid_x = parse_block_column(summary_df["nonrigid_x"])
     nonrigid_corr = parse_block_column(summary_df["nonrigid_corr"])
-    ops = json.loads(h5py.File(output_path)["metadata"][()].decode())[
-        "suite2p_args"
-    ]
+    with h5py.File(output_path, "r") as f:
+        ops = json.loads(f["metadata"][()].decode())["suite2p_args"]
     with Image.open(avg_proj_path) as im:
         Ly, Lx = im.size
     yblock, xblock = make_blocks(Ly=Ly, Lx=Lx, block_size=ops["block_size"])[
@@ -1498,6 +1527,11 @@ def get_frame_rate_from_sync(
     -------
     frame_rate_hz: float
         frame rate in Hz
+
+    Raises
+    ------
+    ValueError
+        If none of the candidate vsync lines yields a frame rate.
     """
     labels = [
         "vsync_2p",
@@ -1506,21 +1540,23 @@ def get_frame_rate_from_sync(
     # The vsync line ticks once per plane group, so divide it back out.
     imaging_groups = len(platform_data["imaging_plane_groups"])
     frame_rate_hz = None
-    for i in labels:
-        logging.info(f"Pulling framerate from sync file: {sync_file}")
-        sync_data = Sync(sync_file)
-        try:
-            rising_edges = sync_data.get_rising_edges(i, units="seconds")
-            image_freq = 1 / (np.mean(np.diff(rising_edges)))
-            frame_rate_hz = image_freq / imaging_groups
-
-        except ValueError:
-            pass
-    sync_data.close()
-    if not frame_rate_hz:
-        raise ValueError(
-            f"Frame rate no acquired, line labels: {sync_data.line_labels}"
-        )
+    logging.info(f"Pulling framerate from sync file: {sync_file}")
+    sync_data = Sync(sync_file)
+    try:
+        for i in labels:
+            try:
+                rising_edges = sync_data.get_rising_edges(i, units="seconds")
+                image_freq = 1 / (np.mean(np.diff(rising_edges)))
+                frame_rate_hz = image_freq / imaging_groups
+            except ValueError:
+                pass
+        if not frame_rate_hz:
+            raise ValueError(
+                f"Frame rate no acquired, line labels: "
+                f"{sync_data.line_labels}"
+            )
+    finally:
+        sync_data.close()
     return frame_rate_hz
 
 
@@ -1630,10 +1666,8 @@ def truncate_for_debug(
 
     The requested length is :data:`DEBUG_DURATION_S` seconds, but the
     converter caps its own debug output well below that, so the slice is
-    frequently a no-op. The effective length is therefore logged rather than
-    the requested one, and a shortfall is called out - an unlogged silent
-    clip is what made a 38x discrepancy between two log lines look like a
-    data defect.
+    frequently a no-op. The effective length is logged rather than the
+    requested one, and a shortfall between the two is called out.
 
     Parameters
     ----------

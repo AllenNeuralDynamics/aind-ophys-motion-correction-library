@@ -1,11 +1,23 @@
 """Tests for MotionCorrectionSettings."""
 
+import json
 import unittest
 from pathlib import Path
 
 from aind_ophys_motion_correction_library.settings import (
     MotionCorrectionSettings,
 )
+
+
+def _cli_value(value: object) -> str:
+    """Serialize a default to the ``--name=value`` form a CO panel emits."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return json.dumps(value)
+    if value is None:
+        return "1.0"
+    return str(value)
 
 
 class TestMotionCorrectionSettings(unittest.TestCase):
@@ -27,7 +39,7 @@ class TestMotionCorrectionSettings(unittest.TestCase):
         self.assertFalse(s.debug)
 
     def test_do_registration_is_bool(self) -> None:
-        """do_registration is a real bool, not the legacy string."""
+        """do_registration is a real bool."""
         s = self._settings()
         self.assertIsInstance(s.do_registration, bool)
         self.assertTrue(s.do_registration)
@@ -61,6 +73,31 @@ class TestMotionCorrectionSettings(unittest.TestCase):
         s = self._settings(data_type="bruker", nonrigid=False)
         self.assertEqual(s.data_type, "bruker")
         self.assertFalse(s.nonrigid)
+
+
+class TestAppPanelContract(unittest.TestCase):
+    """Every field is emittable by a Code Ocean app panel.
+
+    A CO ``named_parameters`` panel can only emit ``--name=value``. A
+    one-character field name renders as a short option (``-k``) the panel
+    cannot produce, so both properties are asserted mechanically here rather
+    than trusting the generator.
+    """
+
+    def test_no_single_character_field_names(self) -> None:
+        """No field renders as a short option."""
+        for name in MotionCorrectionSettings.model_fields:
+            self.assertGreater(
+                len(name), 1, f"{name!r} renders as a short option"
+            )
+
+    def test_every_field_parses_as_named_argument(self) -> None:
+        """Each field accepts the ``--name=value`` form for its default."""
+        defaults = MotionCorrectionSettings(_cli_parse_args=[])
+        for name in MotionCorrectionSettings.model_fields:
+            arg = f"--{name}={_cli_value(getattr(defaults, name))}"
+            parsed = MotionCorrectionSettings(_cli_parse_args=[arg])
+            self.assertTrue(hasattr(parsed, name))
 
 
 if __name__ == "__main__":
