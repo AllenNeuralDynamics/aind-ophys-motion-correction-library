@@ -84,8 +84,9 @@ exclude = '''
 )
 '''
 
-# registration.py + job.py drive Suite2P/torch/GPU and are verified by the
-# Code Ocean data-run, not local unit tests; sync_dataset is vendored.
+# registration.py + job.py are temporarily omitted from coverage: they were
+# inherited from the production capsule, which shipped without unit tests, and
+# are for now exercised by the Code Ocean data-run. sync_dataset is vendored.
 [tool.coverage.run]
 omit = [
     "*/aind_ophys_motion_correction_library/__init__.py",
@@ -103,7 +104,7 @@ exclude_lines = [
     "^import .*",
     "pragma: no cover"
 ]
-fail_under = 85
+fail_under = 100
 
 [tool.isort]
 line_length = 79
