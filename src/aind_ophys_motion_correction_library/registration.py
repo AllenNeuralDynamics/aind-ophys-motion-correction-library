@@ -1900,7 +1900,7 @@ def find_singleplane_input(
         The Bergamo converter names its output after the plane id, so the
         caller currently passes the same value as ``plane_id``; kept as a
         separate parameter since a selector is a different concept from the
-        id that names this capsule's own output directory.
+        id that names this task's own output directory.
 
     Returns
     -------

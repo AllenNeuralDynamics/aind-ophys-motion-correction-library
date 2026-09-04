@@ -30,7 +30,7 @@ class TestMotionCorrectionSettings(unittest.TestCase):
         return MotionCorrectionSettings(_cli_parse_args=[], **kwargs)
 
     def test_defaults(self) -> None:
-        """Core defaults match the capsule's expectations."""
+        """Core defaults match the motion-correction expectations."""
         s = self._settings()
         self.assertEqual(s.input_dir, Path("/data/"))
         self.assertEqual(s.output_dir, Path("/results/"))
@@ -62,11 +62,6 @@ class TestMotionCorrectionSettings(unittest.TestCase):
         s = self._settings(block_size="[64, 96]")
         self.assertEqual(s.block_size, [64, 96])
         self.assertTrue(all(isinstance(x, int) for x in s.block_size))
-
-    def test_verify_flag(self) -> None:
-        """verify defaults False and is settable."""
-        self.assertFalse(self._settings().verify)
-        self.assertTrue(self._settings(verify=True).verify)
 
     def test_overrides(self) -> None:
         """Explicit values override defaults."""

@@ -4,7 +4,7 @@ Normalization of each schema version lives in the shared
 ``aind_pophys_metadata`` library (tested there); these tests cover the
 motion-correction surface: ``load_motion_correction_metadata``, canonical
 plane-id resolution, the Bergamo conditioning-epoch stem, and the ``Code``
-block this capsule stamps onto every emitted document.
+block motion correction stamps onto every emitted document.
 """
 
 import json

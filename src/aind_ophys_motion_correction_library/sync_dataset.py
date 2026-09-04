@@ -1,7 +1,6 @@
 """Vendored Sync (.h5) dataset reader for hardware timing lines.
 
-Carried over from the capsule with type hints added; excluded from the
-docstring gate as third-party-style vendored code.
+Type-hinted; excluded from the docstring gate as vendored third-party code.
 """
 
 import ast

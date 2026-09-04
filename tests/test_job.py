@@ -164,7 +164,7 @@ def _args(output_dir: Path) -> dict:
 
 
 def _suite2p_args(nonrigid: bool = False) -> dict:
-    """Return the Suite2P ops the capsule submits.
+    """Return the Suite2P ops motion correction submits.
 
     Parameters
     ----------

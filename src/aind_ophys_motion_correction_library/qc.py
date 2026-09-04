@@ -1,6 +1,6 @@
 """quality_control.json generation for motion correction.
 
-Capsule-specific metric content over the shared ``aind_pophys_metadata``
+Motion-correction metric content over the shared ``aind_pophys_metadata``
 QC builders: the metric skeleton, the PENDING status, the ``QualityControl``
 wrapper with the project-standard ``default_grouping``, and the writer all
 live in the shared library. ``job.run`` accumulates the metrics built here and

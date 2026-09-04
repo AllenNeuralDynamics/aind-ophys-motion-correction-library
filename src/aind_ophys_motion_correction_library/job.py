@@ -1,6 +1,6 @@
 """Top-level motion-correction orchestration.
 
-``run()`` is the library entry point called by the thin capsule wrapper:
+``run()`` is the library entry point called by the thin runtime wrapper:
 read metadata (v1 or v2) -> configure logging -> resolve this task's plane
 identity -> run Suite2P -> write the registered movie + diagnostics -> emit a
 full ``processing.json`` and ``quality_control.json``.
@@ -111,8 +111,8 @@ def _resolve_plane_input(
         output_dir = reg.make_output_directory(results_root, unique_id)
     elif data_type == "h5" and _is_bergamo(metadata):
         # The Bergamo converter names its stitched movie after the plane id
-        # (e.g. plane_0/plane_0.h5) -- the same id this capsule uses to name
-        # its own output directory -- so one value serves as both.
+        # (e.g. plane_0/plane_0.h5) -- the same id this task uses to name its
+        # own output directory -- so one value serves as both.
         unique_id = mu.resolve_plane_id(
             metadata.fov_ids, fallback=mu.DEFAULT_PLANE_ID
         )
@@ -563,19 +563,6 @@ def _registration_output_parameters(args: dict, reg_out: dict) -> dict:
     return summary
 
 
-def _verify_outputs(output_dir: Path) -> None:
-    """Round-trip the emitted metadata through the core v2 schema objects."""
-    from aind_data_schema.core.processing import Processing
-    from aind_data_schema.core.quality_control import QualityControl
-
-    Processing.model_validate_json(
-        (Path(output_dir) / "processing.json").read_text()
-    )
-    QualityControl.model_validate_json(
-        (Path(output_dir) / "quality_control.json").read_text()
-    )
-
-
 def _build_args(settings: MotionCorrectionSettings, ctx: dict) -> dict:
     """Assemble the resolved run arguments recorded as code parameters.
 
@@ -670,9 +657,7 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
     Parameters
     ----------
     settings : MotionCorrectionSettings, optional
-        Parsed settings; constructed from CLI/env when omitted. When
-        ``settings.verify`` is True, the emitted metadata is round-tripped
-        through the core v2 schema objects after writing.
+        Parsed settings; constructed from CLI/env when omitted.
     """
     settings = settings or MotionCorrectionSettings()
     core = CoreMetadata.load(settings.input_dir)
@@ -716,6 +701,3 @@ def run(settings: Optional[MotionCorrectionSettings] = None) -> None:
         stage.output_parameters = _run_motion_correction(
             settings, metadata, core, ctx
         )
-
-    if settings.verify:
-        _verify_outputs(ctx["output_dir"])

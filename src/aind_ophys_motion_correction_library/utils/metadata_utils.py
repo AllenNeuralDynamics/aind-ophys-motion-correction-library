@@ -1,11 +1,10 @@
 """Acquisition metadata reads for motion correction.
 
-A thin, capsule-specific layer over the shared ``aind_pophys_metadata``
-library. Every schema layout, the version dispatch, the ``Code`` builder and
-the ``processing.json`` lifecycle live in the shared library; this module only
-assembles the ``MotionCorrectionMetadata`` view from the shared
-``CoreMetadata`` reads, resolves this task's canonical plane id, and names the
-motion-correction code artifact.
+A thin, motion-correction-specific layer over the shared
+``aind_pophys_metadata`` library. The shared library owns schema dispatch and
+the output builders; this module only assembles the
+``MotionCorrectionMetadata`` view from the shared ``CoreMetadata`` reads,
+resolves this task's canonical plane id, and names the code artifact.
 """
 
 import logging
@@ -94,7 +93,7 @@ def load_motion_correction_metadata(
     Returns
     -------
     MotionCorrectionMetadata
-        The minimal fields this capsule consumes.
+        The minimal fields motion correction consumes.
 
     Raises
     ------
@@ -123,12 +122,12 @@ def resolve_plane_id(
 ) -> str:
     """Return the plane id this task's output directory is named after.
 
-    Motion correction creates the per-plane directories every downstream
-    capsule keys on, so its plane id must be the canonical one derived from
-    the acquisition metadata (see
-    :meth:`aind_pophys_metadata.CoreMetadata.get_fov_ids`). Metadata that
-    declares no planes still has to run, so every degraded case falls back to
-    the caller's directory-derived id and warns rather than raising.
+    The per-plane id names this task's output directory, which every
+    downstream stage keys on, so it must be the canonical id from the
+    acquisition metadata (see
+    :meth:`aind_pophys_metadata.CoreMetadata.get_fov_ids`). When no canonical
+    id can be chosen, falls back to the directory-derived id and warns rather
+    than raising.
 
     Parameters
     ----------
@@ -215,7 +214,7 @@ def build_code(
     Parameters
     ----------
     parameters : dict
-        Capsule configuration parameters (from ``MotionCorrectionSettings``).
+        Run configuration parameters (from ``MotionCorrectionSettings``).
     input_data : list of str, optional
         Input data path(s)/asset name(s) for provenance.
 

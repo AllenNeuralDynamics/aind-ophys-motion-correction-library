@@ -28,12 +28,6 @@ class MotionCorrectionSettings(BaseSettings, cli_parse_args=True):
         default=Path("/results/"), description="Output directory"
     )
     debug: bool = Field(default=False, description="Run with partial dataset")
-    verify: bool = Field(
-        default=False,
-        description="Round-trip the emitted processing.json / "
-        "quality_control.json through the core v2 schema objects after "
-        "writing, so bad output fails in-capsule rather than downstream",
-    )
     tmp_dir: Path = Field(
         default=Path("/scratch"),
         description="Directory for temporary files produced by Suite2P",

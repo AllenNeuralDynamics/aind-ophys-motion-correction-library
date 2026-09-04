@@ -1,7 +1,7 @@
 """Tests for the metadata-driven helpers in the registration module.
 
 Covers the per-plane output directories motion correction creates (every
-downstream capsule keys on them), the v2 frame-rate read off
+downstream stage keys on them), the v2 frame-rate read off
 ``acquisition.json``, the debug-truncation logging, and single-plane input
 discovery, where the movie is named after the plane id rather than the
 session. The ``run()`` orchestration that calls these helpers is tested in
