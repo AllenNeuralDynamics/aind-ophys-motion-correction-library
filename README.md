@@ -53,7 +53,7 @@ environment (`MOTION_CORRECTION_` prefix) and the Code Ocean app panel.
 
 ### `qc.py`
 
-Capsule-specific QC metric content (`build_registration_summary_metric`,
+Motion-correction QC metric content (`build_registration_summary_metric`,
 `build_fov_quality_metric`) over the shared `aind_pophys_metadata` builders.
 One `quality_control.json` is written per plane.
 
@@ -114,8 +114,8 @@ Tests are `unittest`. The CI gate is:
 uv run flake8 . && uv run interrogate --verbose .
 uv run coverage run -m unittest discover && uv run coverage report
 ```
-Coverage is gated at 85%; `registration.py`, `job.py` and `sync_dataset.py` are
-omitted, since they are exercised by the Code Ocean data run rather than by
+Coverage is gated at 100%; `registration.py`, `job.py` and `sync_dataset.py`
+are omitted, since they are exercised by the Code Ocean data run rather than by
 local unit tests.
 
 ## Level of Support
