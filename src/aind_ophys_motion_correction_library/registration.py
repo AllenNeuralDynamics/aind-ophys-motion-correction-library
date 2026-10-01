@@ -1,49 +1,43 @@
-import argparse
-import copy
+"""Suite2P motion-correction algorithm and per-plane data preparation.
+
+Pure computation and file I/O only; schema (processing.json) lives in
+``utils.metadata_utils``, QC in ``qc``, settings in ``settings``, and
+orchestration in ``job``.
+"""
+
 import json
 import logging
-import os
-import re
-import shutil
 import subprocess
-import tempfile
 import warnings
-from datetime import datetime as dt
-from functools import lru_cache, partial
-from glob import glob
+from functools import lru_cache
 from itertools import product
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from time import time
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
 import h5py
 import matplotlib as mpl
 import numpy as np
 import pandas as pd
-import suite2p
-from aind_data_schema.core.processing import DataProcess
-from aind_data_schema.core.quality_control import QCMetric, QCStatus, Status
-from aind_data_schema_models.process_names import ProcessName
-from aind_log_utils.log import setup_logging
 from aind_ophys_utils.array_utils import normalize_array
 from aind_ophys_utils.summary_images import mean_image
 from aind_ophys_utils.video_utils import (
     downsample_array,
     downsample_h5_video,
-    encode_video,
 )
-from aind_qcportal_schema.metric_value import DropdownMetric
+from aind_pophys_metadata import CoreMetadata
 from matplotlib import pyplot as plt  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont
-from pydantic import Field
-from pydantic_settings import BaseSettings
 from ScanImageTiffReader import ScanImageTiffReader
 from scipy.ndimage import median_filter
 from scipy.stats import sigmaclip
 from suite2p.registration.nonrigid import make_blocks
-from suite2p.registration.register import pick_initial_reference, register_frames
+from suite2p.registration.register import (
+    pick_initial_reference,
+    register_frames,
+)
 from suite2p.registration.rigid import (
     apply_masks,
     compute_masks,
@@ -51,185 +45,24 @@ from suite2p.registration.rigid import (
     phasecorr_reference,
     shift_frame,
 )
-from sync_dataset import Sync
-from typing import Annotated
-from pydantic import Field
+
+from .sync_dataset import Sync
+from .utils import metadata_utils as mu
 
 mpl.use("Agg")
 
+logger = logging.getLogger(__name__)
 
-class MotionCorrectionSettings(BaseSettings, cli_parse_args=True):
-    """Settings for Suite2P motion correction.
+# Debug runs register the first six minutes of a multiplane movie, and a
+# fixed frame count of a Bergamo single-plane movie.
+DEBUG_DURATION_S = 360.0
+DEBUG_SINGLEPLANE_FRAMES = 5000
 
-    This class defines all configuration parameters for motion correction using Suite2P.
-    Values can be provided via constructor, environment variables, or .env file.
-    """
-
-    input_dir: Path = Field(
-        default=Path("/data/"), description="File or directory where h5 file is stored"
-    )
-    output_dir: Path = Field(default=Path("/results/"), description="Output directory")
-    debug: bool = Field(default=False, description="Run with partial dataset")
-    tmp_dir: Path = Field(
-        default=Path("/scratch"),
-        description="Directory into which to write temporary files produced by Suite2P",
-    )
-    data_type: str = Field(
-        default="h5", description="bruker, tif, or h5"
-    )
-    do_registration: bool = Field(
-        default="true",
-        description="whether to register data (2 forces re-registration)",
-    )
-    batch_size: int = Field(default=500, description="Number of frames per batch")
-    align_by_chan: int = Field(
-        default=1,
-        description="when multi-channel, you can align by non-functional channel "
-        "(1-based)",
-    )
-    maxregshift: float = Field(
-        default=0.1,
-        description="max allowed registration shift, as a fraction of "
-        "frame max(width and height). This will be ignored if force_refImg is set to True",
-    )
-    force_refImg: bool = Field(
-        default=True, description="Force the use of an external reference image"
-    )
-    nonrigid: bool = Field(
-        default=True, description="Whether to use non-rigid registration"
-    )
-    block_size: list = Field(default_factory=lambda: [128, 128],
-        description="Block size for non-rigid registration.")
-    snr_thresh: float = Field(
-        default=1.2,
-        description="if any nonrigid block is below this threshold, it gets smoothed "
-        "until above this threshold. 1.0 results in no smoothing",
-    )
-    maxregshiftNR: int = Field(
-        default=5,
-        description="maximum pixel shift allowed for nonrigid, relative to rigid",
-    )
-    outlier_detrend_window: float = Field(
-        default=3.0,
-        description="For outlier rejection in the xoff/yoff outputs of suite2p, the offsets are first de-trended "
-        "with a median filter of this duration [seconds]. "
-        "This value is ~30 or 90 samples in size for 11 and 31 Hz sampling rates respectively.",
-    )
-    outlier_maxregshift: float = Field(
-        default=0.05,
-        description="Units [fraction FOV dim]. After median-filter detrending, outliers more than this value are "
-        "clipped to this value in x and y offset, independently. "
-        "This is similar to Suite2P's internal maxregshift, but allows for low-frequency drift. "
-        "Default value of 0.05 is typically clipping outliers to 512 * 0.05 = 25 pixels above or below the median trend.",
-    )
-    clip_negative: bool = Field(
-        default=False,
-        description="Whether or not to clip negative pixel values in output. Because the pixel values "
-        "in the raw movies are set by the current coming off a photomultiplier tube, there can "
-        "be pixels with negative values (current has a sign), possibly due to noise in the rig. "
-        "Some segmentation algorithms cannot handle negative values in the movie, so we have this "
-        "option to artificially set those pixels to zero.",
-    )
-    max_reference_iterations: int = Field(
-        default=8,
-        description="Maximum number of iterations for creating a reference image",
-    )
-    auto_remove_empty_frames: bool = Field(
-        default=True,
-        description="Automatically detect empty noise frames at the start and end of the movie. Overrides values set in "
-        "trim_frames_start and trim_frames_end. Some movies arrive with otherwise quality data but contain a set of "
-        "frames that are empty and contain pure noise. When processed, these frames tend to receive "
-        "large random shifts that throw off motion border calculation. Turning on this setting automatically "
-        "detects these frames before processing and removes them from reference image creation, automated smoothing "
-        "parameter searches, and finally the motion border calculation. The frames are still written however any "
-        "shift estimated is removed and their shift is set to 0 to avoid large motion borders.",
-    )
-    trim_frames_start: int = Field(
-        default=0,
-        description="Number of frames to remove from the start of the movie if known. Removes frames from motion border calculation "
-        "and resets the frame shifts found. Frames are still written to motion correction. Raises an error if "
-        "auto_remove_empty_frames is set and trim_frames_start > 0",
-    )
-    trim_frames_end: int = Field(
-        default=0,
-        description="Number of frames to remove from the end of the movie if known. Removes frames from motion border calculation "
-        "and resets the frame shifts found. Frames are still written to motion correction. Raises an error if "
-        "auto_remove_empty_frames is set and trim_frames_start > 0",
-    )
-    do_optimize_motion_params: bool = Field(
-        default=False,
-        description="Do a search for best parameters of smooth_sigma and smooth_sigma_time. Adds significant runtime cost to "
-        "motion correction and should only be run once per experiment with the resulting parameters being stored "
-        "for later use.",
-    )
-    smooth_sigma_time: int = Field(
-        default=0,
-        description="gaussian smoothing in time. If do_optimize_motion_params is set, this will be overridden",
-    )
-    smooth_sigma: float = Field(
-        default=1.15,
-        description="~1 good for 2P recordings, recommend 3-5 for 1P recordings. If do_optimize_motion_params is set, this will be overridden",
-    )
-    use_ave_image_as_reference: bool = Field(
-        default=False,
-        description="Only available if `do_optimize_motion_params` is set. After the a best set of smoothing parameters is found, "
-        "use the resulting average image as the reference for the full registration. This can be used as two step "
-        "registration by setting by setting smooth_sigma_min=smooth_sigma_max and "
-        "smooth_sigma_time_min=smooth_sigma_time_max and steps=1.",
-    )
-    # Additional parameters that were hardcoded in the original code
-    movie_lower_quantile: float = Field(
-        default=0.1,
-        description="Lower quantile threshold for avg projection histogram adjustment of movie",
-    )
-    movie_upper_quantile: float = Field(
-        default=0.999,
-        description="Upper quantile threshold for avg projection histogram adjustment of movie",
-    )
-    preview_frame_bin_seconds: float = Field(
-        default=2.0,
-        description="Before creating the webm, the movies will be averaged into bins of this many seconds",
-    )
-    preview_playback_factor: float = Field(
-        default=10.0,
-        description="The preview movie will playback at this factor times real-time",
-    )
-    n_batches: int = Field(
-        default=20,
-        description="Number of batches to load from the movie for smoothing parameter testing. Batches are evenly spaced throughout the movie.",
-    )
-    smooth_sigma_min: float = Field(
-        default=0.65,
-        description="Minimum value of the parameter search for smooth_sigma",
-    )
-    smooth_sigma_max: float = Field(
-        default=2.15,
-        description="Maximum value of the parameter search for smooth_sigma",
-    )
-    smooth_sigma_steps: int = Field(
-        default=4,
-        description="Number of steps to grid between smooth_sigma and smooth_sigma_max",
-    )
-    smooth_sigma_time_min: float = Field(
-        default=0,
-        description="Minimum value of the parameter search for smooth_sigma_time",
-    )
-    smooth_sigma_time_max: float = Field(
-        default=6,
-        description="Maximum value of the parameter search for smooth_sigma_time",
-    )
-    smooth_sigma_time_steps: int = Field(
-        default=7,
-        description="Number of steps to grid between smooth_sigma and smooth_sigma_time_max. Large values will add significant time to motion correction",
-    )
-
-    class Config:
-        env_prefix = "MOTION_CORRECTION_"
-        case_sensitive = False
-        env_file = ".env"
+# Writable scratch directory for the debug-truncated and virtual movies.
+SCRATCH_DIR = Path("/scratch")
 
 
-def is_S3(file_path: str):
+def is_S3(file_path: str) -> bool:
     """Test if a file is in a S3 bucket
     Parameters
     ----------
@@ -241,7 +74,9 @@ def is_S3(file_path: str):
     )
 
 
-def h5py_byteorder_name(h5py_file: h5py.File, h5py_key: str) -> Tuple[str, str]:
+def h5py_byteorder_name(
+    h5py_file: h5py.File, h5py_key: str
+) -> Tuple[str, str]:
     """Get the byteorder and name of the dataset in the h5py file.
 
     Parameters
@@ -318,6 +153,7 @@ def h5py_to_numpy(
 
 @lru_cache(maxsize=None)
 def _tiff_to_numpy(tiff_file: Path) -> np.ndarray:
+    """Read one TIFF file into a numpy array via ScanImageTiffReader."""
     with ScanImageTiffReader(tiff_file) as reader:
         return reader.data()
 
@@ -326,11 +162,11 @@ def tiff_to_numpy(
     tiff_list: List[Path], trim_frames_start: int = 0, trim_frames_end: int = 0
 ) -> np.ndarray:
     """
-    Converts a list of TIFF files to a single numpy array, with optional frame trimming.
+    Converts a list of TIFF files to a single numpy array, with optional frame trimming.  # noqa: E501
 
     Parameters
     ----------
-    tiff_list : List[str]
+    tiff_list : List[Path]
         List of TIFF file paths to process
     trim_frames_start : int, optional
         Number of frames to remove from the start (default: 0)
@@ -362,7 +198,7 @@ def tiff_to_numpy(
     total_frames = get_total_frames(tiff_list)
     if trim_frames_start + trim_frames_end >= total_frames:
         raise ValueError(
-            f"Invalid trim values: start ({trim_frames_start}) + end ({trim_frames_end}) "
+            f"Invalid trim values: start ({trim_frames_start}) + end ({trim_frames_end}) "  # noqa: E501
             f"must be less than total frames ({total_frames})"
         )
 
@@ -414,12 +250,16 @@ def load_initial_frames(
 
     Parameters
     ----------
-    file_path : str
-        Location of the raw ophys, HDF5 data to load.
+    file_path : str or list
+        HDF5 movie path, or a list of TIFF paths.
     h5py_key : str
         Name of the dataset to load from the HDF5 file.
     n_frames : int
         Number of frames to load from the input HDF5 data.
+    trim_frames_start : int
+        Number of frames to disregard from the start of the movie. Default 0.
+    trim_frames_end : int
+        Number of frames to disregard from the end of the movie. Default 0.
 
     Returns
     -------
@@ -427,9 +267,16 @@ def load_initial_frames(
         Frames selected from the input raw data linearly spaced in index of the
         time axis. If n_frames > tot_frames, a number of frames equal to
         tot_frames is returned.
+
+    Raises
+    ------
+    ValueError
+        If ``file_path`` is neither a string nor a list.
     """
     if isinstance(file_path, str):
-        array = h5py_to_numpy(file_path, h5py_key, trim_frames_start, trim_frames_end)
+        array = h5py_to_numpy(
+            file_path, h5py_key, trim_frames_start, trim_frames_end
+        )
     elif isinstance(file_path, list):
         array = tiff_to_numpy(file_path, trim_frames_start, trim_frames_end)
     else:
@@ -444,9 +291,13 @@ def load_initial_frames(
 
 
 def combine_images_with_individual_titles(
-    image1_path: Path, image2_path: Path, output_path: Path, title1: str, title2: str
+    image1_path: Path,
+    image2_path: Path,
+    output_path: Path,
+    title1: str,
+    title2: str,
 ) -> None:
-    """Combine two images side-by-side with padding and titles above each image.
+    """Combine two images side-by-side with padding and titles above each image.  # noqa: E501
 
     Parameters
     ----------
@@ -458,21 +309,22 @@ def combine_images_with_individual_titles(
         Path to save the combined image.
     title1 : str
          Title text for the first image.
-    title2 - str
+    title2 : str
         Title text for the second image.
 
     Returns
     -------
     None
     """
-    # Open both images
-    img1 = Image.open(image1_path)
-    img2 = Image.open(image2_path)
-
-    # Ensure both images have the same height
-    max_height = max(img1.height, img2.height)
-    img1 = img1.resize((img1.width, max_height), Image.Resampling.LANCZOS)
-    img2 = img2.resize((img2.width, max_height), Image.Resampling.LANCZOS)
+    # Resize both to a common height; the resized copies outlive the handles.
+    with Image.open(image1_path) as src1, Image.open(image2_path) as src2:
+        max_height = max(src1.height, src2.height)
+        img1 = src1.resize(
+            (src1.width, max_height), Image.Resampling.LANCZOS
+        )
+        img2 = src2.resize(
+            (src2.width, max_height), Image.Resampling.LANCZOS
+        )
 
     # Set padding and title height
     padding = 20
@@ -492,22 +344,19 @@ def combine_images_with_individual_titles(
     # Draw the titles
     draw = ImageDraw.Draw(combined_image)
     try:
-        font = ImageFont.truetype(
-            "arial.ttf", 24
-        )  # You can replace with a path to your desired font
+        font = ImageFont.truetype("arial.ttf", 24)
     except IOError:
-        font = (
-            ImageFont.load_default()
-        )  # Fallback to default font; may not match expected size
+        # Fallback font; its size may not match the requested 24pt.
+        font = ImageFont.load_default()
 
-    # Title 1: Above the second image
+    # Title 1: above the first image
     bbox1 = draw.textbbox((0, 0), title1, font=font)
     text_width1 = bbox1[2] - bbox1[0]
     text_y1 = padding
     text_x1 = padding + (img1.width - text_width1) // 2
     draw.text((text_x1, text_y1), title1, fill="black", font=font)
 
-    # Title 2: Above the first image
+    # Title 2: above the second image
     bbox2 = draw.textbbox((0, 0), title2, font=font)
     text_width2 = bbox2[2] - bbox2[0]
     text_x2 = padding * 2 + img2.width + (img2.width - text_width2) // 2
@@ -523,104 +372,6 @@ def combine_images_with_individual_titles(
 
     # Save the result
     combined_image.save(output_path)
-
-
-def serialize_registration_summary_qcmetric() -> None:
-    """Serialize the registration summary QCMetric
-
-    This function does not take any parameters.
-
-    QCMetric is named 'registration_summary_metric.json' and is
-    saved to the same directory as *_registration_summary.png.
-    Ex: '/results/<unique_id>/motion_correction/'
-    """
-
-    file_path = next(output_dir.rglob("*_registration_summary.png"))
-
-    # Remove '/results' from file_path
-    reference_filepath = Path(*file_path.parts[2:])
-    unique_id = reference_filepath.parts[0]
-
-    metric = QCMetric(
-        name=f"{unique_id} Registration Summary",
-        description="Review the registration summary plot to ensure that the motion correction is accurate and sufficient.",
-        reference=str(reference_filepath),
-        status_history=[
-            QCStatus(
-                evaluator="Pending review", timestamp=dt.now(), status=Status.PENDING
-            )
-        ],
-        value=DropdownMetric(
-            value=[],
-            options=[
-                "Motion correction successful",
-                "No motion correction applied",
-                "Motion correction failed",
-                "Motion correction partially successful",
-            ],
-            status=[Status.PASS, Status.FAIL, Status.FAIL, Status.FAIL],
-        ),
-    )
-
-    with open(
-        Path(file_path.parent) / f"{unique_id}_registration_summary_metric.json", "w"
-    ) as f:
-        json.dump(json.loads(metric.model_dump_json()), f, indent=4)
-
-
-def serialize_fov_quality_qcmetric() -> None:
-    """Serialize the FOV Quality QCMetric
-
-    This function does not take any parameters.
-
-    QCMetric is named 'fov_quality_metric.json' and is
-    saved to the same directory as *_maximum_projection.png.
-    Ex: '/results/<unique_id>/motion_correction/'
-    """
-
-    avg_projection_file_path = next(output_dir.rglob("*_average_projection.png"))
-    max_projection_file_path = next(output_dir.rglob("*_maximum_projection.png"))
-
-    file_path = Path(str(max_projection_file_path).replace("maximum", "combined"))
-
-    combine_images_with_individual_titles(
-        avg_projection_file_path,
-        max_projection_file_path,
-        file_path,
-        title1="Average Projection",
-        title2="Maximum Projection",
-    )
-
-    # Remove /results from file_path
-    reference_filepath = Path(*file_path.parts[2:])
-    unique_id = reference_filepath.parts[0]
-
-    metric = QCMetric(
-        name=f"{unique_id} FOV Quality",
-        description="Review the avg. and max. projections to ensure that the FOV quality is sufficient.",
-        reference=str(reference_filepath),
-        status_history=[
-            QCStatus(
-                evaluator="Pending review", timestamp=dt.now(), status=Status.PENDING
-            )
-        ],
-        value=DropdownMetric(
-            value=["Quality is sufficient"],
-            options=[
-                "Quality is sufficient",
-                "Timeseries shuffled between planes",
-                "Field of view associated with incorrect area and/or depth",
-                "Paired plane cross talk: Extreme",
-                "Paired plane cross-talk: Moderate",
-            ],
-            status=[Status.PASS, Status.FAIL, Status.FAIL, Status.FAIL, Status.FAIL],
-        ),
-    )
-
-    with open(
-        Path(file_path.parent) / f"{unique_id}_fov_quality_metric.json", "w"
-    ) as f:
-        json.dump(json.loads(metric.model_dump_json()), f, indent=4)
 
 
 def compute_residual_optical_flow(
@@ -657,12 +408,15 @@ def compute_residual_optical_flow(
             flags=0,
         )
     flows_norm = np.sqrt(np.sum(flows**2, -1))
-    farnebackDX = np.transpose([flows_norm.mean((1, 2)), flows_norm.max((1, 2))])
+    farnebackDX = np.transpose(
+        [flows_norm.mean((1, 2)), flows_norm.max((1, 2))]
+    )
     return flows, farnebackDX
 
 
 def compute_crispness(
-    mov_raw: Union[h5py.Dataset, np.ndarray], mov_corr: Union[h5py.Dataset, np.ndarray]
+    mov_raw: Union[h5py.Dataset, np.ndarray],
+    mov_corr: Union[h5py.Dataset, np.ndarray],
 ) -> List[float]:
     """Compute the crispness of the raw and corrected movie.
 
@@ -775,7 +529,9 @@ def compute_reference(
         max_corr_xmax = xmax[isort]
         max_corr_ymax = ymax[isort]
         # Apply shift to the copy of the frames.
-        for frame, dy, dx in zip(max_corr_frames, max_corr_ymax, max_corr_xmax):
+        for frame, dy, dx in zip(
+            max_corr_frames, max_corr_ymax, max_corr_xmax
+        ):
             frame[:] = shift_frame(frame=frame, dy=dy, dx=dx)
 
         # Create a new reference image from the highest correlated data.
@@ -807,13 +563,17 @@ def compute_reference(
                     "Likely the image quality is low and shifting frames "
                     "failed. Setting NaN values to the image mean."
                 )
-            ref_image = np.nan_to_num(ref_image, nan=np.nanmean(ref_image), copy=False)
+            ref_image = np.nan_to_num(
+                ref_image, nan=np.nanmean(ref_image), copy=False
+            )
         ref_image = ref_image.astype(frames_dtype)
 
     return ref_image
 
 
-def remove_extrema_frames(input_frames: np.ndarray, n_sigma: float = 3) -> np.ndarray:
+def remove_extrema_frames(
+    input_frames: np.ndarray, n_sigma: float = 3
+) -> np.ndarray:
     """Remove frames with extremum mean values from the frames used in
     reference image processing/creation.
 
@@ -877,12 +637,13 @@ def optimize_motion_parameters(
             Maximum shift allowed as a fraction of the image dimensions.
     trim_frames_start : int, optional
         Number of frames to disregard from the start of the movie. Default 0.
-    trim_frames_start : int, optional
+    trim_frames_end : int, optional
         Number of frames to disregard from the end of the movie. Default 0.
     n_batches : int
         Number of batches to load. Processing a large number of frames at once
         will likely result in running out of memory, hence processing in
-        batches. Total returned size isn_batches * suit2p_args['batch_size'].
+        batches. Total returned size is
+        n_batches * suite2p_args['batch_size'].
     logger : Optional[Callable]
         Function to print to stdout or a log.
 
@@ -922,7 +683,9 @@ def optimize_motion_parameters(
         batch_size=suite2p_args["batch_size"],
     )
     start_time = time()
-    for param_spatial, param_time in product(smooth_sigmas, smooth_sigma_times):
+    for param_spatial, param_time in product(
+        smooth_sigmas, smooth_sigma_times
+    ):
         current_args = suite2p_args.copy()
         current_args["smooth_sigma"] = param_spatial
         current_args["smooth_sigma_time"] = param_time
@@ -962,7 +725,9 @@ def optimize_motion_parameters(
             best_results["ave_image"] = ave_image
             best_results["ref_image"] = ref_image
             best_results["smooth_sigma"] = current_args["smooth_sigma"]
-            best_results["smooth_sigma_time"] = current_args["smooth_sigma_time"]
+            best_results["smooth_sigma_time"] = current_args[
+                "smooth_sigma_time"
+            ]
         if logger:
             logger(f"\t\tResulting acutance={current_acu:.4f}")
     if logger:
@@ -976,24 +741,24 @@ def optimize_motion_parameters(
 
 
 def load_representative_sub_frames(
-    h5py_name,
-    h5py_key,
+    h5py_name: Union[str, Path],
+    h5py_key: str,
     trim_frames_start: int = 0,
     trim_frames_end: int = 0,
     n_batches: int = 20,
     batch_size: int = 500,
-):
+) -> np.ndarray:
     """Load a subset of frames spanning the full movie.
 
     Parameters
     ----------
-    h5py_name : str
+    h5py_name : str or Path
         Path to the h5 file to load frames from.
     h5py_key : str
         Name of the h5 dataset containing the movie.
     trim_frames_start : int, optional
         Number of frames to disregard from the start of the movie. Default 0.
-    trim_frames_start : int, optional
+    trim_frames_end : int, optional
         Number of frames to disregard from the end of the movie. Default 0.
     n_batches : int
         Number of batches to load. Total returned size is
@@ -1004,6 +769,9 @@ def load_representative_sub_frames(
 
     Returns
     -------
+    np.ndarray
+        The concatenated batches, or the whole movie when it holds fewer
+        frames than were requested.
     """
     output_frames = []
     frame_fracts = np.arange(0, 1, 1 / n_batches)
@@ -1014,7 +782,9 @@ def load_representative_sub_frames(
             return dataset[:]
         for percent_start in frame_fracts:
             frame_start = int(percent_start * total_frames + trim_frames_start)
-            output_frames.append(dataset[frame_start : frame_start + batch_size])
+            output_frames.append(
+                dataset[frame_start : frame_start + batch_size]
+            )
     return np.concatenate(output_frames)
 
 
@@ -1102,12 +872,12 @@ def create_ave_image(
     }
 
 
-def add_modify_required_parameters(suite2p_args: dict):
+def add_modify_required_parameters(suite2p_args: dict) -> None:
     """Check that minimum parameters needed by suite2p registration are
     available. If not add them to the suite2p_args dict.
 
-    Additionally, make sure that nonrigid is set to false as are gridsearch
-    of parameters above is not setup to use nonrigid.
+    Additionally, force nonrigid off: the parameter grid search does not
+    support nonrigid registration.
 
     Parameters
     ----------
@@ -1167,7 +937,7 @@ def check_and_warn_on_datatype(
     logger: Callable,
     filetype: str = "h5",
     h5py_key: str = "",
-):
+) -> None:
     """Suite2p assumes int16 types throughout code. Check that the input
     data is type int16 else throw a warning.
 
@@ -1182,6 +952,10 @@ def check_and_warn_on_datatype(
     h5py_key : str
         Name of the dataset to check. Default is "".
 
+    Raises
+    ------
+    ValueError
+        If ``filetype`` is neither "h5" nor "tiff".
     """
     if filetype == "h5":
         byteorder, name = h5py_byteorder_name(filepath, h5py_key)
@@ -1204,7 +978,8 @@ def check_and_warn_on_datatype(
         )
 
 
-def _mean_of_batch(i, array):
+def _mean_of_batch(i: int, array: np.ndarray) -> np.ndarray:
+    """Return the per-frame mean of a 1000-frame batch starting at i."""
     return array[i : i + 1000].mean(axis=(1, 2))
 
 
@@ -1216,7 +991,7 @@ def find_movie_start_end_empty_frames(
     n_jobs: Optional[int] = None,
 ) -> Tuple[int, int]:
     """Load a movie from HDF5 and find frames at the start and end of the
-    movie that are empty or pure noise and 5 sigma discrepant from the
+    movie that are empty or pure noise and n_sigma discrepant from the
     average frame.
 
     If a non-contiguous set of frames is found, the code will return 0 for
@@ -1224,8 +999,8 @@ def find_movie_start_end_empty_frames(
 
     Parameters
     ----------
-    h5py_name : str
-        Name of the HDF5 file to load from.
+    filepath : str or list of str
+        HDF5 movie path, or a list of TIFF paths.
     h5py_key : str
         Name of the dataset to load from the HDF5 file.
     n_sigma : float
@@ -1288,7 +1063,9 @@ def find_movie_start_end_empty_frames(
     # Check to make sure that the indexes found were only from the start/end
     # of the movie. If not, throw a warning and reset the number of frames
     # found to zero.
-    if not np.array_equal(start_idxs, np.arange(0, lowside, dtype=start_idxs.dtype)):
+    if not np.array_equal(
+        start_idxs, np.arange(0, lowside, dtype=start_idxs.dtype)
+    ):
         lowside = 0
         if logger is not None:
             logger(
@@ -1317,7 +1094,7 @@ def reset_frame_shift(
     dx_array: np.ndarray,
     trim_frames_start: int,
     trim_frames_end: int,
-):
+) -> None:
     """Reset the frames of a movie and their shifts.
 
     Shifts the frame back to its original location and resets the shifts for
@@ -1354,8 +1131,10 @@ def reset_frame_shift(
         dx_array[idx] = 0
 
 
-def projection_process(data: np.ndarray, projection: str = "max") -> np.ndarray:
-    """
+def projection_process(
+    data: np.ndarray, projection: str = "max"
+) -> np.ndarray:
+    """Project a movie over time and normalize it to uint8.
 
     Parameters
     ----------
@@ -1369,13 +1148,19 @@ def projection_process(data: np.ndarray, projection: str = "max") -> np.ndarray:
     proj: np.ndarray
         nrows x ncols, uint8
 
+    Raises
+    ------
+    ValueError
+        If ``projection`` is neither "max" nor "avg".
     """
     if projection == "max":
         proj = np.max(data, axis=0)
     elif projection == "avg":
         proj = np.mean(data, axis=0)
     else:
-        raise ValueError('projection can be "max" or "avg" not ' f"{projection}")
+        raise ValueError(
+            'projection can be "max" or "avg" not ' f"{projection}"
+        )
     return normalize_array(proj)
 
 
@@ -1408,25 +1193,27 @@ def identify_and_clip_outliers(
     detrended = data - data_filtered
     indices = np.argwhere(np.abs(detrended) > thresh).flatten()
     data[indices] = np.clip(
-        data[indices], data_filtered[indices] - thresh, data_filtered[indices] + thresh
+        data[indices],
+        data_filtered[indices] - thresh,
+        data_filtered[indices] + thresh,
     )
     return data, indices
 
 
-def make_output_directory(output_dir: Path, plane: str = "") -> str:
+def make_output_directory(output_dir: Path, plane: str = "") -> Path:
     """Creates the output directory if it does not exist
 
     Parameters
     ----------
     output_dir: Path
-        output directory
+        results root
     plane: str
-        plane number
+        plane id; omit for a directory directly under the root
 
     Returns
     -------
     output_dir: Path
-        output directory
+        the created ``motion_correction`` directory
     """
     if not plane:
         output_dir = output_dir / "motion_correction"
@@ -1436,82 +1223,25 @@ def make_output_directory(output_dir: Path, plane: str = "") -> str:
     return output_dir
 
 
-def get_frame_rate_platform_json(input_dir: str) -> float:
-    """Get the frame rate from the platform json file.
-    Platform json will need to get copied to each data directory throughout the pipeline
+def check_trim_frames(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Reject a config that both auto-removes empty frames and trims manually.
 
     Parameters
     ----------
-    input_dir: str
-        directory where file is located
+    data : dict
+        Suite2p args carrying ``auto_remove_empty_frames`` and the
+        ``trim_frames_start``/``trim_frames_end`` counts.
 
     Returns
     -------
-    frame_rate: float
-        frame rate
-    """
-    try:
-        try:
-            platform_directory = os.path.dirname(os.path.dirname(input_dir))
-            platform_json = glob.glob(f"{platform_directory}/*platform.json")
-        except IndexError:
-            raise IndexError
-        with open(platform_json) as f:
-            data = json.load(f)
-        frame_rate = data["imaging_plane_groups"][0]["acquisition_framerate_Hz"]
-        return frame_rate
-    except IndexError as exc:
-        raise Exception(f"Error: {exc}")
+    dict
+        The unchanged ``data``, when the settings are compatible.
 
-
-def write_data_process(
-    metadata: dict,
-    raw_movie: Union[str, Path],
-    motion_corrected_movie: Union[str, Path],
-    output_dir: Union[str, Path],
-    unique_id: str,
-    start_time: dt,
-    end_time: dt,
-) -> None:
-    """Writes output metadata to plane processing.json
-
-    Parameters
-    ----------
-    metadata: dict
-        parameters from suite2p motion correction
-    raw_movie: str
-        path to raw movies
-    motion_corrected_movie: str
-        path to motion corrected movies
-    """
-    if isinstance(raw_movie, Path):
-        raw_movie = str(raw_movie)
-    if isinstance(motion_corrected_movie, Path):
-        motion_corrected_movie = str(motion_corrected_movie)
-    data_proc = DataProcess(
-        name=ProcessName.VIDEO_MOTION_CORRECTION,
-        software_version=os.getenv("VERSION", ""),
-        start_date_time=start_time.isoformat(),
-        end_date_time=end_time.isoformat(),
-        input_location=str(raw_movie),
-        output_location=str(motion_corrected_movie),
-        code_url=(
-            "https://github.com/AllenNeuralDynamics/"
-            "aind-ophys-motion-correction/tree/main/code"
-        ),
-        parameters=metadata,
-    )
-    if isinstance(output_dir, str):
-        output_dir = Path(output_dir)
-    with open(
-        output_dir / f"{unique_id}_motion_correction_data_process.json", "w"
-    ) as f:
-        json.dump(json.loads(data_proc.model_dump_json()), f, indent=4)
-
-
-def check_trim_frames(data):
-    """Make sure that if the user sets auto_remove_empty_frames
-    and timing frames is already requested, raise an error.
+    Raises
+    ------
+    ValueError
+        If ``auto_remove_empty_frames`` is set alongside a nonzero
+        ``trim_frames_start`` or ``trim_frames_end``.
     """
     if data["auto_remove_empty_frames"] and (
         data["trim_frames_start"] > 0 or data["trim_frames_end"] > 0
@@ -1528,9 +1258,12 @@ def check_trim_frames(data):
 
 
 def make_png(
-    max_proj_path: Path, avg_proj_path: Path, summary_df: pd.DataFrame, dst_path: Path
-):
-    """ """
+    max_proj_path: Path,
+    avg_proj_path: Path,
+    summary_df: pd.DataFrame,
+    dst_path: Path,
+) -> Path:
+    """Write the registration-summary PNG (projections + xy offsets)."""
     xo = np.abs(summary_df["x"]).max()
     yo = np.abs(summary_df["y"]).max()
 
@@ -1554,13 +1287,17 @@ def make_png(
     xyax.plot(summary_df["x"], linewidth=0.5, color="r", label="xoff")
     xyax.axhline(xo, color="r", linestyle="--")
     xyax.axhline(-xo, color="r", linestyle="--")
-    xyax.plot(summary_df["y"], color="g", linewidth=0.5, alpha=0.5, label="yoff")
+    xyax.plot(
+        summary_df["y"], color="g", linewidth=0.5, alpha=0.5, label="yoff"
+    )
     xyax.axhline(yo, color="g", linestyle="--")
     xyax.axhline(-yo, color="g", linestyle="--")
     xyax.legend(loc=0)
     xyax.set_ylabel("correction offset [pixels]")
 
-    corrax.plot(summary_df["correlation"], color="k", linewidth=0.5, label="corrXY")
+    corrax.plot(
+        summary_df["correlation"], color="k", linewidth=0.5, label="corrXY"
+    )
     corrax.set_xlabel("frame index")
     corrax.set_ylabel("correlation peak value")
     corrax.legend(loc=0)
@@ -1570,19 +1307,46 @@ def make_png(
     return dst_path
 
 
-def make_nonrigid_png(
-    output_path: Path, avg_proj_path: Path, summary_df: pd.DataFrame, dst_path: Path
-):
-    """ """
-    nonrigid_y = np.array(list(map(eval, summary_df["nonrigid_y"])), dtype=np.float32)
-    nonrigid_x = np.array(list(map(eval, summary_df["nonrigid_x"])), dtype=np.float32)
-    nonrigid_corr = np.array(
-        list(map(eval, summary_df["nonrigid_corr"])), dtype=np.float32
+def parse_block_column(column: pd.Series) -> np.ndarray:
+    """Parse a bracketed per-block CSV column back into an array.
+
+    Parameters
+    ----------
+    column : pandas.Series
+        Column of bracketed, comma-separated block values, as written by the
+        motion-transform CSV.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(n_frames, n_blocks)`` array of block values.
+    """
+    return np.array(
+        [
+            [float(value) for value in row.strip().strip("[]").split(",")]
+            for row in column
+        ],
+        dtype=np.float32,
     )
-    ops = json.loads(h5py.File(output_path)["metadata"][()].decode())["suite2p_args"]
+
+
+def make_nonrigid_png(
+    output_path: Path,
+    avg_proj_path: Path,
+    summary_df: pd.DataFrame,
+    dst_path: Path,
+) -> Path:
+    """Write the per-block nonrigid registration-summary PNG."""
+    nonrigid_y = parse_block_column(summary_df["nonrigid_y"])
+    nonrigid_x = parse_block_column(summary_df["nonrigid_x"])
+    nonrigid_corr = parse_block_column(summary_df["nonrigid_corr"])
+    with h5py.File(output_path, "r") as f:
+        ops = json.loads(f["metadata"][()].decode())["suite2p_args"]
     with Image.open(avg_proj_path) as im:
         Ly, Lx = im.size
-    yblock, xblock = make_blocks(Ly=Ly, Lx=Lx, block_size=ops["block_size"])[:2]
+    yblock, xblock = make_blocks(Ly=Ly, Lx=Lx, block_size=ops["block_size"])[
+        :2
+    ]
     nblocks = len(xblock)
 
     fig = plt.figure(figsize=(22, 3 * nblocks))
@@ -1603,14 +1367,18 @@ def make_nonrigid_png(
             av_ax.hlines(y, *xblock[i], color="g", linestyle="--")
 
         xyax.plot(nonrigid_x[:, i], linewidth=0.5, color="r", label="xoff")
-        xyax.plot(nonrigid_y[:, i], color="g", linewidth=0.5, alpha=0.5, label="yoff")
+        xyax.plot(
+            nonrigid_y[:, i], color="g", linewidth=0.5, alpha=0.5, label="yoff"
+        )
         if i == 0:
             xyax.legend(loc=0)
         xyax.set_xticks([])
         xyax.set_xlim(0, nonrigid_x.shape[0])
         xyax.set_ylabel("offset [pixels]")
 
-        corrax.plot(nonrigid_corr[:, i], color="k", linewidth=0.5, label="corrXY")
+        corrax.plot(
+            nonrigid_corr[:, i], color="k", linewidth=0.5, label="corrXY"
+        )
         corrax.set_xlim(0, nonrigid_x.shape[0])
         corrax.set_xlabel("frame index")
         corrax.set_ylabel("correlation")
@@ -1652,7 +1420,7 @@ def downsample_normalize(
     Returns
     -------
     ds: np.ndarray
-        a downsampled and normalized array
+        a downsampled array rescaled to the display range
 
     Notes
     -----
@@ -1672,11 +1440,14 @@ def downsample_normalize(
     lower_cutoff, upper_cutoff = np.quantile(
         avg_projection.flatten(), (lower_quantile, upper_quantile)
     )
-    ds = normalize_array(ds, lower_cutoff=lower_cutoff, upper_cutoff=upper_cutoff)
+    ds = normalize_array(
+        ds, lower_cutoff=lower_cutoff, upper_cutoff=upper_cutoff
+    )
     return ds
 
 
-def flow_png(output_path: Path, dst_path: str, iPC: int = 0):
+def flow_png(output_path: Path, dst_path: str, iPC: int = 0) -> None:
+    """Write PC_low/PC_high/residual-optical-flow images for one PC."""
     with h5py.File(output_path) as f:
         regPC = f["reg_metrics/regPC"]
         tPC = f["reg_metrics/tPC"]
@@ -1690,7 +1461,9 @@ def flow_png(output_path: Path, dst_path: str, iPC: int = 0):
         flow_ds_norm = np.sqrt(np.sum(flow_ds**2, 0))
         # redo Suite2p's PCA-based frame selection
         n_frames, Ly, Lx = f["data"].shape
-        nsamp = min(2000 if n_frames < 5000 or Ly > 700 or Lx > 700 else 5000, n_frames)
+        nsamp = min(
+            2000 if n_frames < 5000 or Ly > 700 or Lx > 700 else 5000, n_frames
+        )
         inds = np.linspace(0, n_frames - 1, nsamp).astype("int")
         nlowhigh = np.minimum(300, int(n_frames / 2))
         isort = np.argsort(tPC, axis=0)
@@ -1699,7 +1472,11 @@ def flow_png(output_path: Path, dst_path: str, iPC: int = 0):
             f, a = plt.subplots(2, figsize=(5, 6))
             a[0].set_position([0.08, 0.92, 0.88, 0.08])
             a[0].hist(
-                np.sort(inds[isort[-nlowhigh:, iPC] if k else isort[:nlowhigh, iPC]]),
+                np.sort(
+                    inds[
+                        isort[-nlowhigh:, iPC] if k else isort[:nlowhigh, iPC]
+                    ]
+                ),
                 50,
             )
             a[0].set_title(
@@ -1708,7 +1485,9 @@ def flow_png(output_path: Path, dst_path: str, iPC: int = 0):
             a[1].set_position([0, 0, 1, 0.9])
             vmin = np.min(regPC[1 if k else 0, iPC])
             vmax = 5 * np.median(regPC[1 if k else 0, iPC]) - 4 * vmin
-            a[1].imshow(regPC[1 if k else 0, iPC], cmap="gray", vmin=vmin, vmax=vmax)
+            a[1].imshow(
+                regPC[1 if k else 0, iPC], cmap="gray", vmin=vmin, vmax=vmax
+            )
             a[1].axis("off")
             plt.savefig(
                 dst_path + (f"_PC{iPC}low.png", f"_PC{iPC}high.png")[k],
@@ -1726,15 +1505,20 @@ def flow_png(output_path: Path, dst_path: str, iPC: int = 0):
         plt.colorbar(im, cax=a[0], location="bottom")
         a[0].set_title("residual optical flow")
         plt.savefig(
-            dst_path + f"_PC{iPC}rof.png", format="png", dpi=300, bbox_inches="tight"
+            dst_path + f"_PC{iPC}rof.png",
+            format="png",
+            dpi=300,
+            bbox_inches="tight",
         )
 
 
-def get_frame_rate_from_sync(sync_file, platform_data) -> float:
+def get_frame_rate_from_sync(
+    sync_file: Union[str, Path], platform_data: Dict[str, Any]
+) -> float:
     """Calculate frame rate from sync file
     Parameters
     ----------
-    sync_file: str
+    sync_file: str or Path
         path to sync file
     platform_data: dict
         platform data from platform.json
@@ -1742,97 +1526,44 @@ def get_frame_rate_from_sync(sync_file, platform_data) -> float:
     -------
     frame_rate_hz: float
         frame rate in Hz
-    """
-    labels = ["vsync_2p", "2p_vsync"]  # older versions of sync may 2p_vsync label
-    imaging_groups = len(
-        platform_data["imaging_plane_groups"]
-    )  # Number of imaging plane groups for frequency calculation
-    frame_rate_hz = None
-    for i in labels:
-        logging.info(f"Pulling framerate from sync file: {sync_file}")
-        sync_data = Sync(sync_file)
-        try:
-            rising_edges = sync_data.get_rising_edges(i, units="seconds")
-            image_freq = 1 / (np.mean(np.diff(rising_edges)))
-            frame_rate_hz = image_freq / imaging_groups
 
-        except ValueError:
-            pass
-    sync_data.close()
-    if not frame_rate_hz:
-        raise ValueError(
-            f"Frame rate no acquired, line labels: {sync_data.line_labels}"
-        )
+    Raises
+    ------
+    ValueError
+        If none of the candidate vsync lines yields a frame rate.
+    """
+    labels = [
+        "vsync_2p",
+        "2p_vsync",
+    ]  # older sync files label the line 2p_vsync
+    # The vsync line ticks once per plane group, so divide it back out.
+    imaging_groups = len(platform_data["imaging_plane_groups"])
+    frame_rate_hz = None
+    logging.info(f"Pulling framerate from sync file: {sync_file}")
+    sync_data = Sync(sync_file)
+    try:
+        for i in labels:
+            try:
+                rising_edges = sync_data.get_rising_edges(i, units="seconds")
+                image_freq = 1 / (np.mean(np.diff(rising_edges)))
+                frame_rate_hz = image_freq / imaging_groups
+            except ValueError:
+                pass
+        if not frame_rate_hz:
+            raise ValueError(
+                f"Frame rate no acquired, line labels: "
+                f"{sync_data.line_labels}"
+            )
+    finally:
+        sync_data.close()
     return frame_rate_hz
 
 
-def multiplane_motion_correction(data_dir: Path, output_dir: Path, debug: bool = False):
-    """Process multiplane data for suite2p parameters
-
-    Parameters
-    ----------
-    data_dir: Path
-        path to h5 file
-    output_dir: Path
-        output directory
-    debug: bool
-        run in debug mode
-    Returns
-    -------
-    h5_file: Path
-        path to h5 file
-    output_dir: Path
-        output directory
-    frame_rate_hz: float
-        frame rate in Hz
-    """
-    pattern = re.compile(r"^V.*\d+$")
-    matching_files = [d for d in data_dir.rglob("*.txt") if pattern.match(d.stem)]
-    if len(matching_files) > 0:
-        with open(matching_files[0], "r") as f:
-            h5_file = f.read()
-        h5_file = next(data_dir.rglob(h5_file))
-        unique_id = h5_file.stem
-    else:
-        h5_dir = [i for i in data_dir.rglob("*V*") if i.is_dir()][0]
-        unique_id = h5_dir.name
-        h5_file = [i for i in h5_dir.glob(f"{h5_dir.name}.h5")][0]
-    logging.info("Found raw time series to process %s", h5_file)
-    session_fp = next(data_dir.rglob("session.json"), "")
-    if not session_fp:
-        raise f"Could not locate session.json in {session_fp}"
-    with open(session_fp) as f:
-        session_data = json.load(f)
-    output_dir = make_output_directory(output_dir, unique_id)
-    try:
-        frame_rate_hz = float(
-            session_data["data_streams"][0]["ophys_fovs"][0]["frame_rate"]
-        )
-    except KeyError:
-        logging.warning(
-            "Frame rate not found in session.json, pulling from platform.json"
-        )
-        platform_json = next(data_dir.rglob("*platform.json"))
-        with open(platform_json, "r") as j:
-            platform_data = json.load(j)
-        sync_file = [i for i in data_dir.rglob("platform_data['sync_file']")][0]
-        frame_rate_hz = get_frame_rate_from_sync(sync_file, platform_data)
-    if debug:
-        logging.info(f"Running in debug mode....")
-        raw_data = h5py.File(h5_file, "r")
-        frames_6min = int(360 * float(frame_rate_hz))
-        trimmed_data = raw_data["data"][:frames_6min]
-        raw_data.close()
-        trimmed_fn = Path("../scratch") / f"{unique_id}.h5"
-        with h5py.File(trimmed_fn, "w") as f:
-            f.create_dataset("data", data=trimmed_data)
-        h5_file = trimmed_fn
-    return h5_file, output_dir, frame_rate_hz
-
-
 def update_suite2p_args_reference_image(
-    suite2p_args: dict, args: dict, reference_image_fp=None
-):
+    suite2p_args: dict,
+    args: dict,
+    reference_image_fp: Optional[Path] = None,
+) -> Tuple[dict, dict]:
     """Update the suite2p_args dictionary with the reference image.
 
     Parameters
@@ -1854,7 +1585,8 @@ def update_suite2p_args_reference_image(
     # Use our own version of compute_reference to create the initial
     # reference image used by suite2p.
     logger.info(
-        f'Loading {suite2p_args["nimg_init"]} frames ' "for reference image creation."
+        f'Loading {suite2p_args["nimg_init"]} frames '
+        "for reference image creation."
     )
     if reference_image_fp:
         initial_frames = load_initial_frames(
@@ -1923,11 +1655,12 @@ def update_suite2p_args_reference_image(
         else:
             suite2p_args["refImg"] = optimize_result["ref_image"]
         suite2p_args["smooth_sigma"] = optimize_result["smooth_sigma"]
-        suite2p_args["smooth_sigma_time"] = optimize_result["smooth_sigma_time"]
+        suite2p_args["smooth_sigma_time"] = optimize_result[
+            "smooth_sigma_time"
+        ]
     else:
         # Create the initial reference image and store it in the
-        # suite2p_args dictionary. 8 iterations is the current default
-        # in suite2p.
+        # suite2p_args dictionary.
         tic = -time()
         logger.info("Creating custom reference image...")
         suite2p_args["refImg"] = compute_reference(
@@ -1942,30 +1675,34 @@ def update_suite2p_args_reference_image(
     return suite2p_args, args
 
 
-def generate_single_plane_reference(fp: Path, session) -> Path:
-    """Generate virtual movies for Bergamo data
+def generate_single_plane_reference(
+    fp: Path,
+    core: CoreMetadata,
+    scratch_dir: Path = SCRATCH_DIR,
+) -> Path:
+    """Generate the Bergamo reference movie from the conditioning epoch.
 
     Parameters
     ----------
-    fp: Path
-        path to h5 file
-    session: dict
-        session metadata
+    fp : Path
+        Path to the plane's HDF5 movie.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
+    scratch_dir : Path, optional
+        Writable directory the virtual dataset is written to.
+
     Returns
     -------
     Path
-        path to reference image
+        Path to the reference movie.
     """
+    reference_fp = Path(scratch_dir) / "reference_image.h5"
     with h5py.File(fp, "r") as f:
-        # take the first bci epoch to save out reference image TODO
         tiff_stems = json.loads(f["epoch_locations"][:][0])
-        bci_epochs = [
-            i
-            for i in session["stimulus_epochs"]
-            if i["stimulus_name"] == "single neuron BCI conditioning"
-        ]
-        bci_epoch_loc = [i["output_parameters"]["tiff_stem"] for i in bci_epochs][0]
-        frame_length = tiff_stems[bci_epoch_loc][1] - tiff_stems[bci_epoch_loc][0]
+        bci_epoch_loc = mu.bci_epoch_tiff_stem(core)
+        frame_length = (
+            tiff_stems[bci_epoch_loc][1] - tiff_stems[bci_epoch_loc][0]
+        )
         vsource = h5py.VirtualSource(f["data"])
         layout = h5py.VirtualLayout(
             shape=(frame_length, *f["data"].shape[1:]), dtype=f["data"].dtype
@@ -1974,49 +1711,65 @@ def generate_single_plane_reference(fp: Path, session) -> Path:
             tiff_stems[bci_epoch_loc][0] : tiff_stems[bci_epoch_loc][1]
         ]
 
-        with h5py.File("../scratch/reference_image.h5", "w") as ref:
-
+        with h5py.File(reference_fp, "w") as ref:
             ref.create_virtual_dataset("data", layout)
-    return Path("../scratch/reference_image.h5")
+    return reference_fp
 
 
 def singleplane_motion_correction(
-    h5_file: Path, output_dir: Path, session, unique_id: str, debug: bool = False
-):
-    """Process single plane data for suite2p parameters
+    h5_file: Path,
+    output_dir: Path,
+    core: CoreMetadata,
+    debug: bool = False,
+    scratch_dir: Path = SCRATCH_DIR,
+) -> Tuple[str, Path, str]:
+    """Build the Bergamo reference image and the movie to register.
 
     Parameters
     ----------
-    h5_file: Path
-        path to h5 file
-    output_dir: Path
-        output directory
-    session: dict
-        session metadata
-    unique_id: str
-        experiment id from data description
-    debug: bool
+    h5_file : Path
+        The plane's HDF5 movie.
+    output_dir : Path
+        The per-plane output directory.
+    core : aind_pophys_metadata.CoreMetadata
+        The located acquisition metadata document.
+    debug : bool, optional
+        Register only the first :data:`DEBUG_SINGLEPLANE_FRAMES` frames.
+    scratch_dir : Path, optional
+        Writable directory for the reference and debug movies.
 
     Returns
     -------
-    h5_file: str
-        path to h5 file
-    output_dir: Path
-        output directory
-    reference_image_fp: str
-        path to reference image
+    tuple of (str, Path, str)
+        The movie to register, the output directory, and the reference
+        movie.
     """
-    if not h5_file.is_file():
-        h5_file = [f for f in h5_file.rglob("*.h5") if unique_id in str(f)][0]
-    output_dir = make_output_directory(output_dir, unique_id)
-    reference_image_fp = generate_single_plane_reference(h5_file, session)
+    reference_image_fp = generate_single_plane_reference(
+        h5_file, core, scratch_dir
+    )
     if debug:
-        stem = h5_file.stem
-        debug_file = Path("../scratch") / f"{stem}_debug.h5"
+        debug_file = Path(scratch_dir) / f"{h5_file.stem}_debug.h5"
         with h5py.File(h5_file, "r") as f:
-            data = f["data"][:5000]
+            available_frames = f["data"].shape[0]
+            effective_frames = min(
+                DEBUG_SINGLEPLANE_FRAMES, available_frames
+            )
+            data = f["data"][:effective_frames]
             trial_locations = f["trial_locations"][()]
             epoch_filenames = f["epoch_locations"][()]
+        if DEBUG_SINGLEPLANE_FRAMES > available_frames:
+            logger.warning(
+                "Truncating %s to %d frames (%d requested): movie already "
+                "shorter than the debug target - upstream debug cap in "
+                "effect.",
+                h5_file.name,
+                effective_frames,
+                DEBUG_SINGLEPLANE_FRAMES,
+            )
+        else:
+            logger.info(
+                "Truncating %s to %d frames.", h5_file.name, effective_frames
+            )
         with h5py.File(debug_file, "a") as f:
             f.create_dataset("data", data=data)
             f.create_dataset("trial_locations", data=trial_locations)
@@ -2031,617 +1784,3 @@ def singleplane_motion_correction(
         json.dump(epoch_locations, j)
 
     return str(h5_file), output_dir, str(reference_image_fp)
-
-
-def get_frame_rate(session: dict):
-    """Attempt to pull frame rate from session.json
-    Returns none if frame rate not in session.json
-
-    Parameters
-    ----------
-    session: dict
-        session metadata
-
-    Returns
-    -------
-    frame_rate: float
-        frame rate in Hz
-    """
-    frame_rate_hz = None
-    for i in session.get("data_streams", ""):
-        if i.get("ophys_fovs", ""):
-            frame_rate_hz = i["ophys_fovs"][0]["frame_rate"]
-            break
-    if isinstance(frame_rate_hz, str):
-        frame_rate_hz = float(frame_rate_hz)
-    return frame_rate_hz
-
-
-if __name__ == "__main__":  # pragma: nocover
-    # Set the log level and name the logger
-    logger = logging.getLogger("Suite2P motion correction")
-    logger.setLevel(logging.INFO)
-    start_time = dt.now()
-    # Parse command-line arguments
-    parser = MotionCorrectionSettings()
-    # General settings
-    data_dir = parser.input_dir
-    output_dir = parser.output_dir
-    session_fp = next(data_dir.rglob("session.json"))
-    description_fp = next(data_dir.rglob("data_description.json"))
-    subject_fp = next(data_dir.rglob("subject.json"))
-    with open(session_fp, "r") as j:
-        session = json.load(j)
-    with open(description_fp, "r") as j:
-        data_description = json.load(j)
-    with open(subject_fp, "r") as j:
-        subject = json.load(j)
-    subject_id = subject.get("subject_id", "")
-    name = data_description.get("name", "")
-    setup_logging(
-        "aind-ophys-motion-correction", mouse_id=subject_id, session_name=name
-    )
-    frame_rate_hz = get_frame_rate(session)
-
-    reference_image_fp = ""
-
-    if parser.data_type.lower() == "tif" or parser.data_type.lower() == "bruker":
-        unique_id = "plane_0"
-        try:
-            input_file = next(data_dir.rglob("*/pophys"))
-        except StopIteration:
-            input_file = next(data_dir.rglob("pophys"))
-        output_dir = make_output_directory(output_dir, unique_id)
-    elif parser.data_type.lower() == "h5":
-        unique_id = "MOp2_3_0"  # TODO: remove when upgrade to data-schema v2
-        if "Bergamo" in session.get("rig_id", ""):
-            h5_file, output_dir, reference_image_fp = singleplane_motion_correction(
-                data_dir, output_dir, session, unique_id, debug=parser.debug
-            )
-        else:
-            unique_id = "_".join(str(data_description["name"]).split("_")[-3:])
-            h5_file, output_dir, frame_rate_hz = multiplane_motion_correction(
-                data_dir, output_dir, debug=parser.debug
-            )
-        input_file = str(h5_file)
-    else:
-        raise ValueError(
-            f"Data type {parser.data_type} not supported. "
-            "Please use 'TIFF' or 'h5'."
-        )
-
-    # We convert to dictionary
-    args = vars(parser)
-    args["input_dir"] = str(args["input_dir"])
-    args["output_dir"] = str(args["output_dir"])
-    if not frame_rate_hz:
-        frame_rate_hz = parser.frame_rate
-        logging.warning("User input frame rate used. %s", frame_rate_hz)
-    reference_image = None
-    args["refImg"] = []
-    if reference_image_fp:
-        args["refImg"] = [reference_image_fp]
-    # We construct the paths to the outputs
-    if parser.data_type.lower() == "tif" or parser.data_type.lower() == "bruker":
-        basename = unique_id
-    else:
-        basename = os.path.basename(input_file)
-    args["movie_frame_rate_hz"] = frame_rate_hz
-    for key, default in (
-        ("motion_corrected_output", "_registered.h5"),
-        ("motion_diagnostics_output", "_motion_transform.csv"),
-        ("max_projection_output", "_maximum_projection.png"),
-        ("avg_projection_output", "_average_projection.png"),
-        ("registration_summary_output", "_registration_summary.png"),
-        ("motion_correction_preview_output", "_motion_preview.webm"),
-        ("output_json", "_motion_correction_output.json"),
-    ):
-        args[key] = os.path.join(
-            str(output_dir), os.path.splitext(basename)[0] + default
-        )
-
-    # These are hardcoded parameters of the wrapper. Those are tracked but
-    # not exposed.
-
-    # Lower quantile threshold for avg projection histogram adjustment of movie (default: 0.1)
-    args["movie_lower_quantile"] = 0.1
-    # Upper quantile threshold for avg projection histogram adjustment of movie (default: 0.999)
-    args["movie_upper_quantile"] = 0.999
-    # Before creating the webm, the movies will be averaged into bins of this many seconds.
-    args["preview_frame_bin_seconds"] = 2.0
-    # The preview movie will playback at this factor times real-time.
-    args["preview_playback_factor"] = 10.0
-
-    # Number of batches to load from the movie for smoothing parameter testing.
-    # Batches are evenly spaced throughout the movie.
-    args["n_batches"] = 20
-    # Minimum value of the parameter search for smooth_sigma.
-    args["smooth_sigma_min"] = 0.65
-    # Maximum value of the parameter search for smooth_sigma.
-    args["smooth_sigma_max"] = 2.15
-    # Number of steps to grid between smooth_sigma and smooth_sigma_max.
-    args["smooth_sigma_steps"] = 4
-    # Minimum value of the parameter search for smooth_sigma_time.
-    args["smooth_sigma_time_min"] = 0
-    # Maximum value of the parameter search for smooth_sigma_time.
-    args["smooth_sigma_time_max"] = 6
-    # Number of steps to grid between smooth_sigma and smooth_sigma_time_max.
-    # Large values will add significant time motion correction
-    args["smooth_sigma_time_steps"] = 7
-
-    # This is part of a complex scheme to pass an image that is a bit too
-    # complicated. Will remove when tested.
-
-    # Set suite2p parser.
-    suite2p_args = suite2p.default_ops()
-
-    # Here we overwrite the parameters for suite2p that will not change in our
-    # processing pipeline. These are parameters that are not exposed to
-    # minimize code length. Those are not set to default.
-    if parser.data_type == "h5":
-        suite2p_args["h5py"] = str(input_file)
-    else:
-        suite2p_args["data_path"] = str(input_file)
-        suite2p_args["look_one_level_down"] = True
-        suite2p_args["tiff_list"] = [str(i) for i in input_file.glob("*.tif*")]
-
-    suite2p_args["roidetect"] = False
-    suite2p_args["do_registration"] = parser.do_registration
-    suite2p_args["align_by_chan"] = parser.align_by_chan
-    suite2p_args["reg_tif"] = False  # We save our own outputs here
-    suite2p_args["nimg_init"] = (
-        500  # Nb of images to compute reference. This value is a bit high. Suite2p has it at 300 normally
-    )
-    suite2p_args["maxregshift"] = (
-        parser.maxregshift  # Max allowed registration shift as a fraction of frame max(width and height)
-    )
-    # These parameters are at the same value as suite2p default. This is just here
-    # to make it clear we need those parameters to be at the same value as
-    # suite2p default but those lines could be deleted.
-    suite2p_args["maxregshiftNR"] = (
-        parser.maxregshiftNR  # Maximum shift allowed in pixels for a block in rigid registration.
-    )
-    suite2p_args["batch_size"] = (
-        parser.batch_size
-    )  # Number of frames to process at once
-    if suite2p_args.get("h5py", ""):
-        suite2p_args["h5py_key"] = "data"  # h5 path in the file.
-    suite2p_args["smooth_sigma"] = (
-        parser.smooth_sigma  # Standard deviation in pixels of the gaussian used to smooth the phase correlation.
-    )
-    suite2p_args["smooth_sigma_time"] = (
-        parser.smooth_sigma_time  # "Standard deviation in time frames of the gaussian used to smooth the data before phase correlation is computed
-    )
-    suite2p_args["nonrigid"] = (
-        parser.nonrigid
-    )  # If True, non-rigid registration is performed.
-    suite2p_args["block_size"] = (
-        parser.block_size
-    )  # Block dimensions in y, x in pixels.
-    suite2p_args["snr_thresh"] = (
-        parser.snr_thresh  # If a block is below the above snr threshold. Apply smoothing to the block.
-    )
-
-    # This is to overwrite image reference creation.
-    suite2p_args["refImg"] = args["refImg"]
-    suite2p_args["force_refImg"] = args["force_refImg"]
-
-    # if data is in a S3 bucket, copy it to /scratch for faster access
-    if suite2p_args.get("h5py", ""):
-        if is_S3(suite2p_args["h5py"]):
-            dst = "/scratch/" + Path(suite2p_args["h5py"]).name
-            logger.info(f"copying {suite2p_args['h5py']} from S3 bucket to {dst}")
-            shutil.copy(suite2p_args["h5py"], dst)
-            suite2p_args["h5py"] = dst
-
-    if suite2p_args.get("tiff_list", ""):
-        check_and_warn_on_datatype(
-            filepath=suite2p_args["tiff_list"][0],
-            logger=logger.warning,
-            filetype="tiff",
-        )
-    else:
-        check_and_warn_on_datatype(
-            filepath=suite2p_args["h5py"],
-            logger=logger.warning,
-            filetype="h5",
-            h5py_key=suite2p_args["h5py_key"],
-        )
-
-    if args["auto_remove_empty_frames"] and not parser.data_type.lower() == "bruker":
-        logger.info(
-            "Attempting to find empty frames at the start and end of the movie."
-        )
-        if suite2p_args.get("tiff_list", ""):
-            lowside, highside = find_movie_start_end_empty_frames(
-                filepath=suite2p_args["tiff_list"],
-                logger=logger.warning,
-            )
-        else:
-            lowside, highside = find_movie_start_end_empty_frames(
-                filepath=suite2p_args["h5py"],
-                h5py_key=suite2p_args["h5py_key"],
-                logger=logger.warning,
-            )
-        args["trim_frames_start"] = lowside
-        args["trim_frames_end"] = highside
-        logger.info(f"Found ({lowside}, {highside}) at the start/end of the movie.")
-    if parser.data_type.lower() == "bruker":
-        suite2p_args["force_refImg"] = False
-    if suite2p_args["force_refImg"] and len(suite2p_args["refImg"]) == 0:
-        suite2p_args, args = update_suite2p_args_reference_image(
-            suite2p_args,
-            args,
-        )
-    if reference_image_fp:
-        suite2p_args, args = update_suite2p_args_reference_image(
-            suite2p_args, args, reference_image_fp=reference_image_fp
-        )
-
-        # register with Suite2P
-        logger.info(f"attempting to motion correct {suite2p_args['h5py']}")
-    # make a tempdir for Suite2P's output
-    tmp_dir = tempfile.TemporaryDirectory(dir=args["tmp_dir"])
-    tdir = tmp_dir.name
-    suite2p_args["save_path0"] = tdir
-    logger.info(f"Running Suite2P with output going to {tdir}")
-    args["tmp_dir"] = str(args["tmp_dir"])
-    # Make a copy of the args to remove the NumpyArray, refImg, as
-    # numpy.ndarray can't be serialized with json. Converting to list
-    # and writing to the logger causes the output to be unreadable.
-    copy_of_args = copy.deepcopy(suite2p_args)
-    copy_of_args.pop("refImg")
-
-    msg = f"running Suite2P v{suite2p.version} with args\n"
-    msg += f"{json.dumps(copy_of_args, indent=2, sort_keys=True)}\n"
-    logger.info(msg)
-
-    # If we are using a external reference image (including our own
-    # produced by compute_referece) communicate this in the log.
-    if suite2p_args["force_refImg"]:
-        logger.info(f"\tUsing custom reference image: {suite2p_args['refImg']}")
-
-    if suite2p_args.get("h5py", ""):
-        suite2p_args["h5py"] = suite2p_args["h5py"]
-    suite2p.run_s2p(suite2p_args)
-    data_path = ""
-    if suite2p_args.get("h5py", ""):
-        data_path = suite2p_args["h5py"][0]
-    else:
-        data_path = suite2p_args["data_path"][0]
-
-    if not data_path:
-        raise ValueError("No data path found in suite2p_args")
-    bin_path = list(Path(tdir).rglob("data.bin"))[0]
-    ops_path = list(Path(tdir).rglob("ops.npy"))[0]
-    # Suite2P ops file contains at least the following keys:
-    # ["Lx", "Ly", "nframes", "xrange", "yrange", "xoff", "yoff",
-    #  "corrXY", "meanImg"]
-    ops = np.load(ops_path, allow_pickle=True).item()
-
-    # identify and clip offset outliers
-    detrend_size = int(frame_rate_hz * args["outlier_detrend_window"])
-    xlimit = int(ops["Lx"] * args["outlier_maxregshift"])
-    ylimit = int(ops["Ly"] * args["outlier_maxregshift"])
-    logger.info(
-        "checking whether to clip where median-filtered "
-        "offsets exceed (x,y) limits of "
-        f"({xlimit},{ylimit}) [pixels]"
-    )
-    delta_x, x_clipped = identify_and_clip_outliers(
-        np.array(ops["xoff"]), detrend_size, xlimit
-    )
-    delta_y, y_clipped = identify_and_clip_outliers(
-        np.array(ops["yoff"]), detrend_size, ylimit
-    )
-    clipped_indices = list(set(x_clipped).union(set(y_clipped)))
-    logger.info(f"{len(x_clipped)} frames clipped in x")
-    logger.info(f"{len(y_clipped)} frames clipped in y")
-    logger.info(f"{len(clipped_indices)} frames will be adjusted for clipping")
-
-    # accumulate data from Suite2P's binary file
-    data = suite2p.io.BinaryFile(ops["Ly"], ops["Lx"], bin_path).data
-
-    if args["clip_negative"]:
-        data[data < 0] = 0
-        data = np.uint16(data)
-
-    # anywhere we've clipped the offset, translate the frame
-    # using Suite2P's shift_frame by the difference resulting
-    # from clipping, for example, if Suite2P moved a frame
-    # by 100 pixels, and we have clipped that to 30, this will
-    # move it -70 pixels
-    if not suite2p_args["nonrigid"]:
-        # If using non-rigid, we can't modify the output frames and have
-        # the shifts make sense. Hence we don't calculate which shifts
-        # to clip given that the shift will no longer make sense.
-        for frame_index in clipped_indices:
-            dx = delta_x[frame_index] - ops["xoff"][frame_index]
-            dy = delta_y[frame_index] - ops["yoff"][frame_index]
-            data[frame_index] = suite2p.registration.rigid.shift_frame(
-                data[frame_index], dy, dx
-            )
-
-    # If we found frames that are empty at the end and beginning of the
-    # movie, we reset their motion shift and set their shifts to 0.
-    reset_frame_shift(
-        data,
-        delta_y,
-        delta_x,
-        args["trim_frames_start"],
-        args["trim_frames_end"],
-    )
-    # Create a boolean lookup of frames we reset as they were found
-    # to be empty.
-    is_valid = np.ones(len(data), dtype="bool")
-    is_valid[: args["trim_frames_start"]] = False
-    is_valid[len(data) - args["trim_frames_end"] :] = False
-
-    # write the hdf5
-    with h5py.File(args["motion_corrected_output"], "w") as f:
-        f.create_dataset("data", data=data, chunks=(1, *data.shape[1:]))
-        # Sort the reference image used to register. If we do not used
-        # our custom reference image creation code, this dataset will
-        # be empty.
-        f.create_dataset("ref_image", data=suite2p_args["refImg"])
-        # Write a copy of the configuration output of this dataset into the
-        # HDF5 file.
-        args_copy = copy.deepcopy(args)
-        suite_args_copy = copy.deepcopy(suite2p_args)
-        # We have to pop the ref image out as numpy arrays can't be
-        # serialized into json. The reference image is instead stored in
-        # the 'ref_image' dataset.
-        suite_args_copy.pop("refImg")
-        args_copy.pop("refImg")
-        args_copy["suite2p_args"] = suite_args_copy
-        f.create_dataset(name="metadata", data=json.dumps(args_copy).encode("utf-8"))
-        # save Suite2p registration metrics
-        f.create_group("reg_metrics")
-        f.create_dataset("reg_metrics/regDX", data=ops.get("regDX", []))
-        f.create_dataset("reg_metrics/regPC", data=ops.get("regPC", []))
-        f.create_dataset("reg_metrics/tPC", data=ops.get("tPC", []))
-    logger.info(f"saved Suite2P output to {args['motion_corrected_output']}")
-    # make projections
-    mx_proj = projection_process(data, projection="max")
-    av_proj = projection_process(data, projection="avg")
-    if parser.data_type.lower() == "tif":
-        input_file = input_file[0]
-    if parser.data_type.lower() == "bruker":
-        input_file = str(input_file)
-    write_data_process(
-        args_copy,
-        input_file,
-        args["motion_corrected_output"],
-        output_dir,
-        basename.split(".")[0],
-        start_time,
-        end_time=dt.now(),
-    )
-    # TODO: normalize here, if desired
-    # save projections
-    for im, dst_path in zip(
-        [mx_proj, av_proj],
-        [
-            args["max_projection_output"],
-            args["avg_projection_output"],
-        ],
-    ):
-        with Image.fromarray(im) as pilim:
-            pilim.save(dst_path)
-        logger.info(f"wrote {dst_path}")
-
-    # Save motion offset data to a csv file
-    # TODO: This *.csv file is being created to maintain compatibility
-    # with current ophys processing pipeline. In the future this output
-    # should be removed and a better data storage format used.
-    # 01/25/2021 - NJM
-    if suite2p_args["nonrigid"]:
-        # Convert data to string for storage in the CSV output.
-        nonrigid_x = [
-            np.array2string(
-                arr,
-                separator=",",
-                suppress_small=True,
-                max_line_width=4096,
-            )
-            for arr in ops["xoff1"]
-        ]
-        nonrigid_y = [
-            np.array2string(
-                arr,
-                separator=",",
-                suppress_small=True,
-                max_line_width=4096,
-            )
-            for arr in ops["yoff1"]
-        ]
-        nonrigid_corr = [
-            np.array2string(
-                arr,
-                separator=",",
-                suppress_small=True,
-                max_line_width=4096,
-            )
-            for arr in ops["corrXY1"]
-        ]
-        motion_offset_df = pd.DataFrame(
-            {
-                "framenumber": list(range(ops["nframes"])),
-                "x": ops["xoff"],
-                "y": ops["yoff"],
-                "x_pre_clip": ops["xoff"],
-                "y_pre_clip": ops["yoff"],
-                "correlation": ops["corrXY"],
-                "is_valid": is_valid,
-                "nonrigid_x": nonrigid_x,
-                "nonrigid_y": nonrigid_y,
-                "nonrigid_corr": nonrigid_corr,
-            }
-        )
-    else:
-        motion_offset_df = pd.DataFrame(
-            {
-                "framenumber": list(range(ops["nframes"])),
-                "x": delta_x,
-                "y": delta_y,
-                "x_pre_clip": ops["xoff"],
-                "y_pre_clip": ops["yoff"],
-                "correlation": ops["corrXY"],
-                "is_valid": is_valid,
-            }
-        )
-    motion_offset_df.to_csv(path_or_buf=args["motion_diagnostics_output"], index=False)
-    logger.info(
-        f"Writing the LIMS expected 'OphysMotionXyOffsetData' "
-        f"csv file to: {args['motion_diagnostics_output']}"
-    )
-
-    if len(clipped_indices) != 0 and not suite2p_args["nonrigid"]:
-        logger.warning(
-            "some offsets have been clipped and the values "
-            "for 'correlation' in "
-            "{args['motion_diagnostics_output']} "
-            "where (x_clipped OR y_clipped) = True are not valid"
-        )
-
-    # create and write the summary png
-    motion_offset_df = pd.read_csv(args["motion_diagnostics_output"])
-    png_out_path = make_png(
-        Path(args["max_projection_output"]),
-        Path(args["avg_projection_output"]),
-        motion_offset_df,
-        Path(args["registration_summary_output"]),
-    )
-    logger.info(f"wrote {png_out_path}")
-
-    # create and write the nonrigid summary png
-    if "nonrigid_x" in motion_offset_df.keys():
-        p = Path(args["registration_summary_output"])
-        nonrigid_png_out_path = make_nonrigid_png(
-            Path(args["motion_corrected_output"]),
-            Path(args["avg_projection_output"]),
-            motion_offset_df,
-            p.parent.joinpath(p.stem + "_nonrigid" + p.suffix),
-        )
-        logger.info(f"wrote {nonrigid_png_out_path}")
-
-    # downsample and normalize the input movies
-    ds_partial = partial(
-        downsample_normalize,
-        frame_rate=args["movie_frame_rate_hz"],
-        bin_size=args["preview_frame_bin_seconds"],
-        lower_quantile=args["movie_lower_quantile"],
-        upper_quantile=args["movie_upper_quantile"],
-    )
-    if suite2p_args.get("h5py", ""):
-        h5_file = suite2p_args["h5py"]
-        processed_vids = [
-            ds_partial(i)
-            for i in [
-                Path(h5_file),
-                Path(args["motion_corrected_output"]),
-            ]
-        ]
-    else:
-        tiff_array = tiff_to_numpy(suite2p_args["tiff_list"])
-        processed_vids = [
-            ds_partial(i)
-            for i in [
-                tiff_array,
-                Path(args["motion_corrected_output"]),
-            ]
-        ]
-
-    logger.info(
-        "finished downsampling motion corrected and non-motion corrected movies"
-    )
-
-    # tile into 1 movie, raw on left, motion corrected on right
-    try:
-        tiled_vids = np.block(processed_vids)
-
-        # make into a viewable artifact
-        playback_fps = (
-            args["preview_playback_factor"] / args["preview_frame_bin_seconds"]
-        )
-        encode_video(tiled_vids, args["motion_correction_preview_output"], playback_fps)
-        logger.info("wrote " f"{args['motion_correction_preview_output']}")
-    except:
-        logger.info("Could not write motion correction preview")
-    # compute crispness of mean image using raw and registered movie
-    if suite2p_args.get("h5py", ""):
-        with (
-            h5py.File(h5_file) as f_raw,
-            h5py.File(args["motion_corrected_output"], "r+") as f,
-        ):
-            mov_raw = f_raw["data"]
-            mov = f["data"]
-            regDX = f["reg_metrics/regDX"][:]
-            crispness = compute_crispness(mov_raw, mov)
-            logger.info(
-                "computed crispness of mean image before and after registration"
-            )
-
-            # compute residual optical flow using Farneback method
-            if f["reg_metrics/regPC"][:].any():
-                flows, farnebackDX = compute_residual_optical_flow(
-                    f["reg_metrics/regPC"]
-                )
-                f.create_dataset("reg_metrics/farnebackROF", data=flows)
-                f.create_dataset("reg_metrics/farnebackDX", data=farnebackDX)
-                logger.info(
-                    "computed residual optical flow of top PCs using Farneback method"
-                )
-                # create image of PC_low, PC_high, and the residual optical flow between them
-            f.create_dataset("reg_metrics/crispness", data=crispness)
-            logger.info(
-                "appended additional registration metrics to"
-                f"{args['motion_corrected_output']}"
-            )
-
-    else:
-        with h5py.File(args["motion_corrected_output"], "r+") as f:
-            regDX = f["reg_metrics/regDX"][:]
-            crispness = compute_crispness(tiff_array, f["data"])
-            logger.info(
-                "computed crispness of mean image before and after registration"
-            )
-            if f["reg_metrics/regPC"][:].any():
-                regPC = f["reg_metrics/regPC"]
-
-                flows, farnebackDX = compute_residual_optical_flow(regPC)
-
-                f.create_dataset("reg_metrics/farnebackROF", data=flows)
-                f.create_dataset("reg_metrics/farnebackDX", data=farnebackDX)
-                logger.info(
-                    "computed residual optical flow of top PCs using Farneback method"
-                )
-
-            f.create_dataset("reg_metrics/crispness", data=crispness)
-            logger.info(
-                "appended additional registration metrics to"
-                f"{args['motion_corrected_output']}"
-            )
-
-    if regDX.any() and farnebackDX.any():
-        for iPC in set(
-            (
-                np.argmax(regDX[:, -1]),
-                np.argmax(farnebackDX[:, -1]),
-            )
-        ):
-            p = Path(args["registration_summary_output"])
-            flow_png(
-                Path(args["motion_corrected_output"]),
-                str(p.parent / p.stem),
-                iPC,
-            )
-        logger.info(f"created images of PC_low, PC_high, and PC_rof for PC {iPC}")
-    # Clean up temporary directory
-    try:
-        tmp_dir.cleanup()
-    except:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-    # Write QC metrics
-    serialize_registration_summary_qcmetric()
-    serialize_fov_quality_qcmetric()
