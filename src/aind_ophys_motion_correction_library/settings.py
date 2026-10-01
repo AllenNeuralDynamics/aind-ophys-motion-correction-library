@@ -40,7 +40,7 @@ class MotionCorrectionSettings(BaseSettings, cli_parse_args=True):
     )
     do_registration: bool = Field(
         default=True,
-        description="whether to register data (2 forces re-registration)",
+        description="Whether to register the movie",
     )
     batch_size: int = Field(
         default=500, description="Number of frames per batch"
