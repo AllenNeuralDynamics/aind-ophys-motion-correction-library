@@ -349,6 +349,40 @@ class TestWriteMotionCsv(unittest.TestCase):
         )
 
 
+class TestWriteQualityControl(unittest.TestCase):
+    """The per-plane quality_control.json written beside the figures."""
+
+    def test_metrics_reference_the_figures_they_describe(self) -> None:
+        """Each metric references the figure its description names."""
+        results_root = Path(tempfile.mkdtemp())
+        output_dir = results_root / "VISp_0" / "motion_correction"
+        output_dir.mkdir(parents=True)
+        job._write_quality_control(
+            SimpleNamespace(output_dir=results_root),
+            {"output_dir": output_dir, "unique_id": "VISp_0"},
+            _args(output_dir),
+        )
+        document = json.loads(
+            (output_dir / "quality_control.json").read_text()
+        )
+        references = {m["name"]: m["reference"] for m in document["metrics"]}
+        self.assertEqual(
+            references,
+            {
+                "VISp_0 Registration Summary": (
+                    "VISp_0/motion_correction/VISp_0_registration_summary.png"
+                ),
+                "VISp_0 FOV Quality": (
+                    "VISp_0/motion_correction/VISp_0_maximum_projection.png"
+                ),
+            },
+        )
+        self.assertEqual(
+            {m["tags"]["evaluation"] for m in document["metrics"]},
+            {"Motion Correction"},
+        )
+
+
 class TestWriteRegisteredH5(unittest.TestCase):
     """The registered movie, its metadata and the registration metrics."""
 

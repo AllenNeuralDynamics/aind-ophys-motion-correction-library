@@ -18,6 +18,8 @@ from aind_data_schema.core.quality_control import (
 )
 from aind_pophys_metadata import quality_control as shared_qc
 
+EVALUATION = "Motion Correction"
+
 
 def pending_qc_status() -> QCStatus:
     """Return a PENDING QCStatus timestamped to US/Pacific."""
@@ -44,7 +46,7 @@ def build_registration_summary_metric(
     """
     return shared_qc.dropdown_metric(
         name=f"{unique_id} Registration Summary",
-        evaluation="Registration Summary",
+        evaluation=EVALUATION,
         options=[
             "Motion correction successful",
             "No motion correction applied",
@@ -54,8 +56,8 @@ def build_registration_summary_metric(
         status=[Status.PASS, Status.FAIL, Status.FAIL, Status.FAIL],
         reference=reference_filepath,
         description=(
-            "Review the registration summary plot to ensure that the "
-            "motion correction is accurate and sufficient."
+            "Registration summary plot. Check that motion correction is "
+            "accurate and sufficient."
         ),
     )
 
@@ -80,7 +82,7 @@ def build_fov_quality_metric(
     """
     return shared_qc.dropdown_metric(
         name=f"{unique_id} FOV Quality",
-        evaluation="FOV Quality",
+        evaluation=EVALUATION,
         options=[
             "Quality is sufficient",
             "Timeseries shuffled between planes",
@@ -97,8 +99,8 @@ def build_fov_quality_metric(
         ],
         reference=reference_filepath,
         description=(
-            "Review the avg. and max. projections to ensure that the "
-            "FOV quality is sufficient."
+            "Maximum projection of the registered movie. Check that the "
+            "field of view is in focus and usable."
         ),
     )
 
