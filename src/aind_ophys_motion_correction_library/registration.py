@@ -28,7 +28,7 @@ from aind_ophys_utils.video_utils import (
     downsample_array,
     downsample_h5_video,
 )
-from aind_pophys_metadata import CoreMetadata, find_one, io
+from aind_pophys_metadata import CoreMetadata, find_one, io, search
 from matplotlib import pyplot as plt  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont
 from ScanImageTiffReader import ScanImageTiffReader
@@ -1581,9 +1581,9 @@ def find_multiplane_input(data_dir: Path) -> Tuple[Path, str]:
     """
     data_dir = Path(data_dir)
     pattern = re.compile(r"^V.*\d+$")
-    matching_files = sorted(
-        d for d in data_dir.rglob("*.txt") if pattern.match(d.stem)
-    )
+    matching_files = [
+        d for d in search(data_dir, "*.txt") if pattern.match(d.stem)
+    ]
     if matching_files:
         if len(matching_files) > 1:
             logger.warning(
@@ -1596,9 +1596,7 @@ def find_multiplane_input(data_dir: Path) -> Tuple[Path, str]:
             h5_name = f.read()
         h5_file = find_one(data_dir, h5_name)
     else:
-        h5_dir = next(
-            (i for i in data_dir.rglob("*V*") if i.is_dir()), None
-        )
+        h5_dir = next((i for i in search(data_dir, "*V*") if i.is_dir()), None)
         if h5_dir is None:
             raise FileNotFoundError(
                 f"No plane directory matching '*V*' found under {data_dir}"
@@ -1911,9 +1909,7 @@ def find_singleplane_input(
     """
     h5_file = Path(data_dir)
     if not h5_file.is_file():
-        matches = sorted(
-            f for f in h5_file.rglob("*.h5") if selector in str(f)
-        )
+        matches = [f for f in search(h5_file, "*.h5") if selector in str(f)]
         if not matches:
             raise FileNotFoundError(
                 f"No '*.h5' movie whose path contains {selector!r} found "
