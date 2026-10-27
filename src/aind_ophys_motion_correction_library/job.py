@@ -235,7 +235,7 @@ def _stage_and_trim(
 ) -> None:
     """Copy S3 inputs locally, warn on dtype, and trim empty frames."""
     if suite2p_args.get("h5py", "") and reg.is_S3(suite2p_args["h5py"]):
-        dst = "/scratch/" + Path(suite2p_args["h5py"]).name
+        dst = str(Path(settings.tmp_dir) / Path(suite2p_args["h5py"]).name)
         logger.info(f"copying {suite2p_args['h5py']} from S3 to {dst}")
         shutil.copy(suite2p_args["h5py"], dst)
         suite2p_args["h5py"] = dst

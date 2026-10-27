@@ -12,13 +12,15 @@ import os
 import shutil
 import tempfile
 import unittest
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
 
 from aind_pophys_metadata import CoreMetadata, io
-from aind_pophys_metadata import processing as shared_processing
 
 from aind_ophys_motion_correction_library.utils import metadata_utils as mu
+
+LIBRARY = "aind-ophys-motion-correction-library"
 
 RESOURCES = Path(__file__).parent / "resources"
 V2_MULTIPLANE = RESOURCES / "acquisition_multiplane_v2.json"
@@ -321,14 +323,15 @@ class TestBuildCode(unittest.TestCase):
     """Code identity: a resolvable version and a matching url."""
 
     @patch.dict(os.environ, {"VERSION": "3.2.1"}, clear=True)
-    def test_version_resolves_from_installed_library(self) -> None:
-        """The backing library identifies the code; VERSION is ignored."""
+    def test_identity_is_the_installed_library(self) -> None:
+        """name, version and url describe this library; VERSION is ignored."""
         code = mu.build_code({"a": 1})
-        self.assertEqual(
-            code.version, shared_processing.library_version(mu.LIBRARY_NAME)
-        )
+        self.assertEqual(code.name, LIBRARY)
+        self.assertEqual(code.version, version(LIBRARY))
         self.assertNotEqual(code.version, "3.2.1")
-        self.assertEqual(code.url, mu.CODE_URL)
+        self.assertEqual(
+            code.url, f"https://github.com/AllenNeuralDynamics/{LIBRARY}"
+        )
 
     def test_code_url_has_no_branch_ref(self) -> None:
         """The recorded url is a landing page, never a branch subpath."""

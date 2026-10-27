@@ -15,15 +15,25 @@ class TestQCMetrics(unittest.TestCase):
     def test_registration_summary_metric(self) -> None:
         """Registration-summary metric names, tags, and reference set."""
         m = qc.build_registration_summary_metric("plane_0", "ref.png")
-        self.assertIn("plane_0", m.name)
-        self.assertEqual(m.tags["evaluation"], "Registration Summary")
+        self.assertEqual(m.name, "plane_0 Registration Summary")
+        self.assertEqual(m.tags["evaluation"], "Motion Correction")
+        self.assertEqual(m.tags["type"], "Operational QC")
         self.assertEqual(m.reference, "ref.png")
 
     def test_fov_quality_metric(self) -> None:
         """FOV-quality metric carries the evaluation + type tags."""
         m = qc.build_fov_quality_metric("plane_0", "combined.png")
-        self.assertEqual(m.tags["evaluation"], "FOV Quality")
+        self.assertEqual(m.name, "plane_0 FOV Quality")
+        self.assertEqual(m.tags["evaluation"], "Motion Correction")
         self.assertEqual(m.tags["type"], "Operational QC")
+
+    def test_fov_quality_description_matches_its_reference(self) -> None:
+        """The text describes the maximum projection the reference shows."""
+        m = qc.build_fov_quality_metric("plane_0", "max.png")
+        text = m.description.lower()
+        self.assertIn("maximum projection", text)
+        self.assertNotIn("average", text)
+        self.assertNotIn("avg", text)
 
     def test_pending_status(self) -> None:
         """The default status history entry is PENDING."""
@@ -62,7 +72,11 @@ class TestQualityControlCollector(unittest.TestCase):
         self.assertEqual(len(q.metrics), 2)
         out = qc.write_quality_control_json(q, d)
         self.assertEqual(out.name, "quality_control.json")
-        QualityControl.model_validate_json(out.read_text())
+        reloaded = QualityControl.model_validate_json(out.read_text())
+        self.assertEqual(
+            {m.tags["evaluation"] for m in reloaded.metrics},
+            {"Motion Correction"},
+        )
 
 
 if __name__ == "__main__":
