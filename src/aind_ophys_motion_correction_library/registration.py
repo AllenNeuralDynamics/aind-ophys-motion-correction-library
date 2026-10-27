@@ -59,9 +59,6 @@ logger = logging.getLogger(__name__)
 DEBUG_DURATION_S = 360.0
 DEBUG_SINGLEPLANE_FRAMES = 5000
 
-# Writable scratch directory for the debug-truncated and virtual movies.
-SCRATCH_DIR = Path("/scratch")
-
 
 def is_S3(file_path: str) -> bool:
     """Test if a file is in a S3 bucket
@@ -1667,7 +1664,7 @@ def truncate_for_debug(
     h5_file: Path,
     unique_id: str,
     frame_rate_hz: float,
-    scratch_dir: Path = SCRATCH_DIR,
+    scratch_dir: Path,
 ) -> Path:
     """Write a debug-length copy of a plane movie to scratch.
 
@@ -1684,7 +1681,7 @@ def truncate_for_debug(
         Plane id, used to name the scratch copy.
     frame_rate_hz : float
         Acquisition frame rate in Hz.
-    scratch_dir : Path, optional
+    scratch_dir : Path
         Writable directory the copy is written to.
 
     Returns
@@ -1841,7 +1838,7 @@ def update_suite2p_args_reference_image(
 def generate_single_plane_reference(
     fp: Path,
     core: CoreMetadata,
-    scratch_dir: Path = SCRATCH_DIR,
+    scratch_dir: Path,
 ) -> Path:
     """Generate the Bergamo reference movie from the conditioning epoch.
 
@@ -1851,7 +1848,7 @@ def generate_single_plane_reference(
         Path to the plane's HDF5 movie.
     core : aind_pophys_metadata.CoreMetadata
         The located acquisition metadata document.
-    scratch_dir : Path, optional
+    scratch_dir : Path
         Writable directory the virtual dataset is written to.
 
     Returns
@@ -1939,7 +1936,8 @@ def singleplane_motion_correction(
     output_dir: Path,
     core: CoreMetadata,
     debug: bool = False,
-    scratch_dir: Path = SCRATCH_DIR,
+    *,
+    scratch_dir: Path,
 ) -> Tuple[str, Path, str]:
     """Build the Bergamo reference image and the movie to register.
 
@@ -1953,7 +1951,7 @@ def singleplane_motion_correction(
         The located acquisition metadata document.
     debug : bool, optional
         Register only the first :data:`DEBUG_SINGLEPLANE_FRAMES` frames.
-    scratch_dir : Path, optional
+    scratch_dir : Path
         Writable directory for the reference and debug movies.
 
     Returns

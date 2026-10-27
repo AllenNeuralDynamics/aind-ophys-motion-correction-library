@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import h5py
 import numpy as np
@@ -417,6 +418,30 @@ class TestWriteRegisteredH5(unittest.TestCase):
         with h5py.File(args["motion_corrected_output"], "r") as f:
             self.assertEqual(f["reg_metrics/regDX"].size, 0)
             self.assertEqual(f["reg_metrics/regPC"].size, 0)
+
+
+class TestStageAndTrim(unittest.TestCase):
+    """S3 staging in _stage_and_trim."""
+
+    def test_s3_input_is_staged_into_tmp_dir(self) -> None:
+        """An S3-backed movie is copied into settings.tmp_dir."""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "mount" / "VISp_0.h5"
+            source.parent.mkdir()
+            source.write_bytes(b"movie")
+            scratch = Path(tmp) / "scratch"
+            scratch.mkdir()
+            settings = SimpleNamespace(tmp_dir=scratch, data_type="h5")
+            suite2p_args = {"h5py": str(source), "h5py_key": "data"}
+            args = {"auto_remove_empty_frames": False}
+            with (
+                patch.object(reg, "is_S3", return_value=True),
+                patch.object(reg, "check_and_warn_on_datatype"),
+            ):
+                job._stage_and_trim(settings, suite2p_args, args)
+            staged = scratch / "VISp_0.h5"
+            self.assertEqual(suite2p_args["h5py"], str(staged))
+            self.assertEqual(staged.read_bytes(), b"movie")
 
 
 if __name__ == "__main__":
