@@ -18,19 +18,6 @@ from aind_pophys_metadata import processing as shared_processing
 
 logger = logging.getLogger(__name__)
 
-# Human-readable name of the motion-correction code artifact.
-CODE_NAME = "aind-ophys-motion-correction"
-
-# Distribution name of this backing library; the sole source of
-# ``Code.version``.
-LIBRARY_NAME = "aind-ophys-motion-correction-library"
-
-# Repository this code lives in, recorded as ``Code.url``.
-CODE_URL = (
-    "https://github.com/AllenNeuralDynamics/"
-    "aind-ophys-motion-correction-library"
-)
-
 # Plane id used when the acquisition metadata declares no planes at all.
 DEFAULT_PLANE_ID = "plane_0"
 
@@ -221,13 +208,11 @@ def build_code(
     Returns
     -------
     Code
-        The populated code block: :data:`CODE_URL` for the repository, and
-        the installed backing library for the version.
+        The populated code block; name, version and url are this library's
+        installed package metadata.
     """
     return shared_processing.build_code(
-        CODE_NAME,
-        library_name=LIBRARY_NAME,
-        url=CODE_URL,
+        __name__,
         parameters=parameters,
         input_data=input_data,
     )
