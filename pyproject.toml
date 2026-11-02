@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aind-ophys-motion-correction-library"
-description = "Generated from aind-library-template"
+description = "Suite2P-based motion correction for AIND optical physiology, with aind-data-schema v2 metadata I/O."
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 authors = [
     {name = "Allen Institute for Neural Dynamics"}
 ]
@@ -17,7 +17,28 @@ readme = "README.md"
 version = "0.0.2"
 
 dependencies = [
+    "aind-data-schema==2.9.0",
+    "aind-data-schema-models==6.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.3.1",
+    "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
+    "aind-ophys-utils==0.2.0",
+    "torch==2.13.0",
+    "suite2p==0.14.6",
+    "sbxreader==0.2.3",
+    "numpy==2.2.6",
+    "pandas==2.3.3",
+    "h5py==3.16.0",
+    "opencv-python-headless==5.0.0.93",
+    "matplotlib==3.10.9",
+    "Pillow==12.3.0",
+    "scipy==1.15.3",
+    "pytz==2026.2",
+    "pydantic==2.11.10",
+    "pydantic-settings==2.14.2",
 ]
+
+[project.urls]
+Repository = "https://github.com/AllenNeuralDynamics/aind-ophys-motion-correction-library"
 
 [dependency-groups]
 dev = [
@@ -32,6 +53,17 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Pull torch from the PyTorch CPU wheel index (preserves the original
+# capsule's CPU-only torch install; suite2p otherwise resolves the large
+# default CUDA build). Honored by uv; GPU runs override via the CO base image.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.black]
 line-length = 79
@@ -55,8 +87,17 @@ exclude = '''
 )
 '''
 
+# registration.py + job.py are temporarily omitted from coverage: they were
+# inherited from the production capsule, which shipped without unit tests, and
+# are for now exercised by the Code Ocean data-run. sync_dataset is vendored.
 [tool.coverage.run]
-omit = ["*__init__*"]
+omit = [
+    "*/aind_ophys_motion_correction_library/__init__.py",
+    "*/aind_ophys_motion_correction_library/utils/__init__.py",
+    "*/aind_ophys_motion_correction_library/sync_dataset.py",
+    "*/aind_ophys_motion_correction_library/registration.py",
+    "*/aind_ophys_motion_correction_library/job.py",
+]
 source = ["aind_ophys_motion_correction_library", "tests"]
 
 [tool.coverage.report]
@@ -74,5 +115,11 @@ profile = "black"
 skip = [".conda", ".venv"]
 
 [tool.interrogate]
-exclude = ["setup.py", "docs", "build", ".conda"]
+exclude = [
+    "setup.py",
+    "docs",
+    "build",
+    ".conda",
+    "src/aind_ophys_motion_correction_library/sync_dataset.py",
+]
 fail-under = 100
