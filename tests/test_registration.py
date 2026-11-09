@@ -197,5 +197,86 @@ class TestDebugTruncation(unittest.TestCase):
             self.assertEqual(f["data"].shape[0], 36)
 
 
+class TestGenerateSinglePlaneReference(unittest.TestCase):
+    """The reference movie holds exactly the reference epochs' frames."""
+
+    def _movie(self, directory: Path, epochs: dict) -> Path:
+        """Write a movie whose frame ``i`` is filled with the value ``i``.
+
+        Parameters
+        ----------
+        directory : Path
+            Where to write the movie.
+        epochs : dict
+            ``epoch_locations``: stem to ``[start, stop]`` frame range.
+
+        Returns
+        -------
+        Path
+            The movie.
+        """
+        movie = directory / "plane_0.h5"
+        frames = np.arange(12, dtype="int16")[:, None, None] * np.ones(
+            (1, 4, 4), dtype="int16"
+        )
+        with h5py.File(movie, "w") as f:
+            f.create_dataset("data", data=frames)
+            f.create_dataset("epoch_locations", data=[json.dumps(epochs)])
+        return movie
+
+    def _reference_frames(self, document: dict, epochs: dict) -> list:
+        """Build the reference movie and return its per-frame values.
+
+        Parameters
+        ----------
+        document : dict
+            The ``metadata.json`` content.
+        epochs : dict
+            ``epoch_locations`` of the movie.
+
+        Returns
+        -------
+        list of int
+            The value of each reference frame.
+        """
+        directory = Path(tempfile.mkdtemp())
+        (directory / "metadata.json").write_text(json.dumps(document))
+        core = CoreMetadata.load(directory)
+        movie = self._movie(directory, epochs)
+        reference = reg.generate_single_plane_reference(
+            movie, core, directory
+        )
+        with h5py.File(reference, "r") as f:
+            return [int(frame[0, 0]) for frame in f["data"][()]]
+
+    def test_concatenates_reference_epochs_in_document_order(self) -> None:
+        """Photostim frames are left out; the rest are joined in order."""
+        epochs = {"a": [0, 4], "b": [4, 8], "c": [8, 12]}
+        document = {
+            "epochs": [
+                {"stimulus_name": "a", "tiff_stem": "a"},
+                {"stimulus_name": "b", "tiff_stem": "b", "photostim": True},
+                {"stimulus_name": "c", "tiff_stem": "c"},
+            ]
+        }
+        self.assertEqual(
+            self._reference_frames(document, epochs),
+            [0, 1, 2, 3, 8, 9, 10, 11],
+        )
+
+    def test_single_reference_epoch(self) -> None:
+        """One reference epoch gives exactly its frame range."""
+        epochs = {"a": [0, 4], "b": [4, 8]}
+        document = {
+            "epochs": [
+                {"stimulus_name": "a", "tiff_stem": "a"},
+                {"stimulus_name": "b", "tiff_stem": "b", "reference": True},
+            ]
+        }
+        self.assertEqual(
+            self._reference_frames(document, epochs), [4, 5, 6, 7]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

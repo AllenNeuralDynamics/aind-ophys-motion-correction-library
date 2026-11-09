@@ -55,7 +55,7 @@ mpl.use("Agg")
 logger = logging.getLogger(__name__)
 
 # Debug runs register the first six minutes of a multiplane movie, and a
-# fixed frame count of a Bergamo single-plane movie.
+# fixed frame count of a single-plane TIFF-stack movie.
 DEBUG_DURATION_S = 360.0
 DEBUG_SINGLEPLANE_FRAMES = 5000
 
@@ -1838,7 +1838,10 @@ def generate_single_plane_reference(
     core: CoreMetadata,
     scratch_dir: Path,
 ) -> Path:
-    """Generate the Bergamo reference movie from the conditioning epoch.
+    """Build the reference movie from the reference epochs' frames.
+
+    The reference epochs' frame ranges are concatenated, in document order,
+    into one virtual dataset.
 
     Parameters
     ----------
@@ -1857,17 +1860,18 @@ def generate_single_plane_reference(
     reference_fp = Path(scratch_dir) / "reference_image.h5"
     with h5py.File(fp, "r") as f:
         tiff_stems = json.loads(f["epoch_locations"][:][0])
-        bci_epoch_loc = mu.bci_epoch_tiff_stem(core)
-        frame_length = (
-            tiff_stems[bci_epoch_loc][1] - tiff_stems[bci_epoch_loc][0]
-        )
+        ranges = [
+            tiff_stems[stem] for stem in mu.reference_epoch_tiff_stems(core)
+        ]
+        frame_length = sum(stop - start for start, stop in ranges)
         vsource = h5py.VirtualSource(f["data"])
         layout = h5py.VirtualLayout(
             shape=(frame_length, *f["data"].shape[1:]), dtype=f["data"].dtype
         )
-        layout[0:frame_length] = vsource[
-            tiff_stems[bci_epoch_loc][0] : tiff_stems[bci_epoch_loc][1]
-        ]
+        offset = 0
+        for start, stop in ranges:
+            layout[offset : offset + stop - start] = vsource[start:stop]
+            offset += stop - start
 
         with h5py.File(reference_fp, "w") as ref:
             ref.create_virtual_dataset("data", layout)
@@ -1880,7 +1884,7 @@ def find_singleplane_input(
     plane_id: str,
     selector: str,
 ) -> Tuple[Path, Path]:
-    """Locate a Bergamo plane movie and create its output directory.
+    """Locate a TIFF-stack plane movie and create its output directory.
 
     Parameters
     ----------
@@ -1892,7 +1896,7 @@ def find_singleplane_input(
         Canonical plane id; names the output directory.
     selector : str
         Substring identifying this acquisition's movie in its staged path.
-        The Bergamo converter names its output after the plane id, so the
+        The converter names its output after the plane id, so the
         caller currently passes the same value as ``plane_id``; kept as a
         separate parameter since a selector is a different concept from the
         id that names this task's own output directory.
@@ -1935,7 +1939,7 @@ def singleplane_motion_correction(
     *,
     scratch_dir: Path,
 ) -> Tuple[str, Path, str]:
-    """Build the Bergamo reference image and the movie to register.
+    """Build the TIFF-stack reference image and the movie to register.
 
     Parameters
     ----------

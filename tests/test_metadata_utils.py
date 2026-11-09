@@ -3,7 +3,7 @@
 Normalization of each schema version lives in the shared
 ``aind_pophys_metadata`` library (tested there); these tests cover the
 motion-correction surface: ``load_motion_correction_metadata``, canonical
-plane-id resolution, the Bergamo conditioning-epoch stem, and the ``Code``
+plane-id resolution, the reference-epoch stems, and the ``Code``
 block motion correction stamps onto every emitted document.
 """
 
@@ -115,7 +115,7 @@ class TestLoadMetadata(unittest.TestCase):
         _write(d, "subject.json", {"subject_id": "781"})
         md = mu.load_motion_correction_metadata(d)
         self.assertEqual(md.frame_rate, 9.6)
-        self.assertEqual(md.instrument_id, "MESO.1")
+        self.assertEqual(md.raw_format, "mesoscope_aind")
         self.assertEqual(md.subject_id, "781")
         self.assertEqual(md.dataset_name, "mouse_1_2024")
 
@@ -132,7 +132,7 @@ class TestLoadMetadata(unittest.TestCase):
         )
         md = mu.load_motion_correction_metadata(d)
         self.assertEqual(md.frame_rate, 11.0)
-        self.assertEqual(md.instrument_id, "Bergamo.1")
+        self.assertEqual(md.raw_format, "tiff_stack")
         self.assertIsNone(md.subject_id)
         self.assertEqual(md.fov_ids, ("plane_0",))
 
@@ -191,7 +191,7 @@ class TestLoadMetadata(unittest.TestCase):
         """The real upgraded v2 acquisition yields eight canonical ids."""
         md = mu.load_motion_correction_metadata(_v2_multiplane_dir())
         self.assertEqual(md.fov_ids, V2_FOV_IDS)
-        self.assertEqual(md.instrument_id, "MESO.2")
+        self.assertEqual(md.raw_format, "mesoscope_aind")
         self.assertAlmostEqual(md.frame_rate, 10.63)
 
     def test_core_is_not_reread(self) -> None:
@@ -257,11 +257,11 @@ def _staged_core(core_name: str, core: dict) -> CoreMetadata:
     return CoreMetadata.load(directory)
 
 
-class TestBciEpochTiffStem(unittest.TestCase):
-    """The Bergamo reference epoch reads from either stem route."""
+class TestReferenceEpochTiffStems(unittest.TestCase):
+    """The reference epochs read from either stem route."""
 
     def test_stem_from_epoch_output_parameters(self) -> None:
-        """A document carrying the stem on the epoch itself resolves."""
+        """A v1 document's first conditioning epoch is the reference."""
         core = _staged_core(
             "session.json",
             {
@@ -269,7 +269,7 @@ class TestBciEpochTiffStem(unittest.TestCase):
                 "stimulus_epochs": [
                     {"stimulus_name": "spontaneous activity"},
                     {
-                        "stimulus_name": mu.BCI_STIMULUS_NAME,
+                        "stimulus_name": "single neuron BCI conditioning",
                         "output_parameters": {
                             TIFF_STEM_KEY: BERGAMO_STEM
                         },
@@ -277,13 +277,13 @@ class TestBciEpochTiffStem(unittest.TestCase):
                 ],
             },
         )
-        self.assertEqual(mu.bci_epoch_tiff_stem(core), BERGAMO_STEM)
+        self.assertEqual(mu.reference_epoch_tiff_stems(core), (BERGAMO_STEM,))
 
     def test_stem_from_data_stream_note(self) -> None:
         """A document carrying only the stream note resolves identically."""
         core = json.loads(V2_BERGAMO.read_text())
         core = _staged_core("acquisition.json", core)
-        self.assertEqual(mu.bci_epoch_tiff_stem(core), BERGAMO_STEM)
+        self.assertEqual(mu.reference_epoch_tiff_stems(core), (BERGAMO_STEM,))
 
     def test_both_routes_agree(self) -> None:
         """Adding the epoch-side stem does not change the result."""
@@ -291,14 +291,14 @@ class TestBciEpochTiffStem(unittest.TestCase):
         for epoch in core["stimulus_epochs"]:
             epoch["output_parameters"] = {TIFF_STEM_KEY: BERGAMO_STEM}
         core = _staged_core("acquisition.json", core)
-        self.assertEqual(mu.bci_epoch_tiff_stem(core), BERGAMO_STEM)
+        self.assertEqual(mu.reference_epoch_tiff_stems(core), (BERGAMO_STEM,))
 
     def test_first_matching_epoch_in_document_order_wins(self) -> None:
         """Document order picks the epoch; it is not sorted by time."""
         core = json.loads(V2_BERGAMO.read_text())
         core["stimulus_epochs"] = list(reversed(core["stimulus_epochs"]))
         core = _staged_core("acquisition.json", core)
-        self.assertEqual(mu.bci_epoch_tiff_stem(core), "neuron3_2")
+        self.assertEqual(mu.reference_epoch_tiff_stems(core), ("neuron3_2",))
 
     def test_stemless_epoch_raises_named_error(self) -> None:
         """Neither route present raises ValueError, not a bare KeyError."""
@@ -307,16 +307,67 @@ class TestBciEpochTiffStem(unittest.TestCase):
             stream["notes"] = None
         core = _staged_core("acquisition.json", core)
         with self.assertRaises(ValueError) as caught:
-            mu.bci_epoch_tiff_stem(core)
+            mu.reference_epoch_tiff_stems(core)
         message = str(caught.exception)
-        self.assertIn(mu.BCI_STIMULUS_NAME, message)
+        self.assertIn("reference", message)
         self.assertIn("acquisition.json", message)
 
     def test_no_conditioning_epoch_raises(self) -> None:
         """An acquisition with no conditioning epoch degrades to the error."""
         core = CoreMetadata.load(_v2_multiplane_dir())
         with self.assertRaises(ValueError):
-            mu.bci_epoch_tiff_stem(core)
+            mu.reference_epoch_tiff_stems(core)
+
+    def test_minimal_defaults_to_every_non_photostim_epoch(self) -> None:
+        """An external document needs no AIND stimulus names."""
+        core = _staged_core(
+            "metadata.json",
+            {
+                "raw_format": "tiff_stack",
+                "epochs": [
+                    {"stimulus_name": "a", "tiff_stem": "a"},
+                    {
+                        "stimulus_name": "b",
+                        "tiff_stem": "b",
+                        "photostim": True,
+                    },
+                    {"stimulus_name": "c", "tiff_stem": "c"},
+                ],
+            },
+        )
+        self.assertEqual(mu.reference_epoch_tiff_stems(core), ("a", "c"))
+
+    def test_minimal_stated_reference(self) -> None:
+        """A stated reference flag selects exactly those epochs."""
+        core = _staged_core(
+            "metadata.json",
+            {
+                "epochs": [
+                    {"stimulus_name": "a", "tiff_stem": "a"},
+                    {
+                        "stimulus_name": "b",
+                        "tiff_stem": "b",
+                        "reference": True,
+                    },
+                ],
+            },
+        )
+        self.assertEqual(mu.reference_epoch_tiff_stems(core), ("b",))
+
+
+class TestIsTiffStack(unittest.TestCase):
+    """The single-movie branch keys on the raw format."""
+
+    def test_raw_formats(self) -> None:
+        """Only a TIFF stack takes the single-movie branch."""
+        for raw_format, expected in (
+            ("tiff_stack", True),
+            ("mesoscope_aind", False),
+            (None, False),
+        ):
+            with self.subTest(raw_format=raw_format):
+                metadata = mu.MotionCorrectionMetadata(raw_format=raw_format)
+                self.assertEqual(mu.is_tiff_stack(metadata), expected)
 
 
 class TestBuildCode(unittest.TestCase):
