@@ -197,6 +197,69 @@ class TestDebugTruncation(unittest.TestCase):
             self.assertEqual(f["data"].shape[0], 36)
 
 
+class TestLoadInitialFrames(unittest.TestCase):
+    """HDF5 input reads only the sampled frames, matching a full read."""
+
+    def setUp(self) -> None:
+        """Write a movie whose frame ``i`` is filled with ``i``."""
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.movie = Path(self._tmp.name) / "movie.h5"
+        frames = np.arange(20, dtype="int16")[:, None, None] * np.ones(
+            (1, 3, 3), dtype="int16"
+        )
+        with h5py.File(self.movie, "w") as f:
+            f.create_dataset("data", data=frames)
+
+    def _values(self, path: Path, **kwargs) -> list:
+        """Return the per-frame values ``load_initial_frames`` selects.
+
+        Parameters
+        ----------
+        path : Path
+            HDF5 movie.
+        **kwargs
+            Passed to :func:`registration.load_initial_frames`.
+
+        Returns
+        -------
+        list of int
+            The value of each selected frame.
+        """
+        frames = reg.load_initial_frames(str(path), "data", **kwargs)
+        return [int(frame[0, 0]) for frame in frames]
+
+    def test_samples_evenly_within_the_trim(self) -> None:
+        """The same frames as sampling a fully read, trimmed movie."""
+        self.assertEqual(
+            self._values(
+                self.movie, n_frames=4, trim_frames_start=2, trim_frames_end=2
+            ),
+            [2, 6, 10, 14],
+        )
+
+    def test_more_frames_than_the_movie_returns_every_frame(self) -> None:
+        """Requesting more frames than exist returns them all."""
+        self.assertEqual(
+            self._values(self.movie, n_frames=50), list(range(20))
+        )
+
+    def test_reads_a_virtual_reference(self) -> None:
+        """A virtual dataset over the movie samples like the movie."""
+        reference = Path(self._tmp.name) / "reference.h5"
+        with h5py.File(self.movie, "r") as f:
+            source = h5py.VirtualSource(f["data"])
+            layout = h5py.VirtualLayout(
+                shape=(10, 3, 3), dtype=f["data"].dtype
+            )
+            layout[0:10] = source[5:15]
+        with h5py.File(reference, "w") as ref:
+            ref.create_virtual_dataset("data", layout)
+        self.assertEqual(
+            self._values(reference, n_frames=5), [5, 7, 9, 11, 13]
+        )
+
+
 class TestGenerateSinglePlaneReference(unittest.TestCase):
     """The reference movie holds exactly the reference epochs' frames."""
 
