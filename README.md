@@ -66,8 +66,8 @@ rate source.
 
 The `MotionCorrectionMetadata` view over v1/v2 metadata
 (`load_motion_correction_metadata`), canonical plane-id resolution
-(`resolve_plane_id`), the Bergamo conditioning-epoch TIFF stem
-(`bci_epoch_tiff_stem`), and the `Code` block (`build_code`).
+(`resolve_plane_id`), the reference-epoch TIFF stems
+(`reference_epoch_tiff_stems`), and the `Code` block (`build_code`).
 
 ## Outputs
 
@@ -85,7 +85,7 @@ plane basename:
 | `processing.json` | full `Processing` document for this plane |
 | `quality_control.json` | full `QualityControl` document for this plane |
 
-Bergamo single-plane runs additionally write `trial_locations.json` and
+TIFF-stack single-plane runs additionally write `trial_locations.json` and
 `epoch_locations.json`. `flow_png` writes `*_PC<n>low/high/rof.png` beside the
 registration summary when registration principal components are available.
 

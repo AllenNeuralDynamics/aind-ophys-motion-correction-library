@@ -93,7 +93,7 @@ def _resolve_plane_input(
         ) or find_one(data_dir, "pophys")
         output_dir = reg.make_output_directory(results_root, unique_id)
     elif data_type == "h5" and mu.is_tiff_stack(metadata):
-        # The converter names a stitched TIFF-stack movie after the plane id
+        # The Bergamo converter names its stitched movie after the plane id
         # (e.g. plane_0/plane_0.h5) -- the same id this task uses to name its
         # own output directory -- so one value serves as both.
         unique_id = mu.resolve_plane_id(

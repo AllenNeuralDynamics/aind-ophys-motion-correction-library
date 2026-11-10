@@ -55,7 +55,7 @@ mpl.use("Agg")
 logger = logging.getLogger(__name__)
 
 # Debug runs register the first six minutes of a multiplane movie, and a
-# fixed frame count of a single-plane TIFF-stack movie.
+# fixed frame count of a Bergamo single-plane movie.
 DEBUG_DURATION_S = 360.0
 DEBUG_SINGLEPLANE_FRAMES = 5000
 
@@ -1840,9 +1840,6 @@ def generate_single_plane_reference(
 ) -> Path:
     """Build the reference movie from the reference epochs' frames.
 
-    The reference epochs' frame ranges are concatenated, in document order,
-    into one virtual dataset.
-
     Parameters
     ----------
     fp : Path
@@ -1884,7 +1881,7 @@ def find_singleplane_input(
     plane_id: str,
     selector: str,
 ) -> Tuple[Path, Path]:
-    """Locate a TIFF-stack plane movie and create its output directory.
+    """Locate a Bergamo plane movie and create its output directory.
 
     Parameters
     ----------
@@ -1896,7 +1893,7 @@ def find_singleplane_input(
         Canonical plane id; names the output directory.
     selector : str
         Substring identifying this acquisition's movie in its staged path.
-        The converter names its output after the plane id, so the
+        The Bergamo converter names its output after the plane id, so the
         caller currently passes the same value as ``plane_id``; kept as a
         separate parameter since a selector is a different concept from the
         id that names this task's own output directory.
@@ -1939,7 +1936,7 @@ def singleplane_motion_correction(
     *,
     scratch_dir: Path,
 ) -> Tuple[str, Path, str]:
-    """Build the TIFF-stack reference image and the movie to register.
+    """Build the Bergamo reference image and the movie to register.
 
     Parameters
     ----------

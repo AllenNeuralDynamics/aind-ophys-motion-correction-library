@@ -261,7 +261,7 @@ class TestReferenceEpochTiffStems(unittest.TestCase):
     """The reference epochs read from either stem route."""
 
     def test_stem_from_epoch_output_parameters(self) -> None:
-        """A v1 document's first conditioning epoch is the reference."""
+        """A document carrying the stem on the epoch itself resolves."""
         core = _staged_core(
             "session.json",
             {
