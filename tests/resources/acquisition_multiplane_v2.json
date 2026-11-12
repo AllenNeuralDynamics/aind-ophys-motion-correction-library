@@ -3,16 +3,16 @@
   "describedBy": "https://raw.githubusercontent.com/AllenNeuralDynamics/aind-data-schema/main/src/aind_data_schema/core/acquisition.py",
   "schema_version": "2.5.3",
   "protocol_id": null,
-  "subject_id": "804670",
+  "subject_id": "999997",
   "specimen_id": null,
-  "acquisition_start_time": "2025-09-03T09:35:27.072537-07:00",
+  "acquisition_start_time": "2025-07-01T09:35:27.072537-07:00",
   "acquisition_start_tz": -7,
-  "acquisition_end_time": "2025-09-03T10:36:07.794107-07:00",
+  "acquisition_end_time": "2025-07-01T10:36:07.794107-07:00",
   "experimenters": [
-    "shiella caldejon"
+    "Experimenter B"
   ],
   "ethics_review_id": [
-    "2115"
+    "0000"
   ],
   "instrument_id": "MESO.2",
   "acquisition_type": "TRAINING_1_gratings",
@@ -24,8 +24,8 @@
   "data_streams": [
     {
       "object_type": "Data stream",
-      "stream_start_time": "2025-09-03T09:35:27.072537-07:00",
-      "stream_end_time": "2025-09-03T10:36:07.794107-07:00",
+      "stream_start_time": "2025-07-01T09:35:27.072537-07:00",
+      "stream_end_time": "2025-07-01T10:36:07.794107-07:00",
       "modalities": [
         {
           "name": "Planar optical physiology",
