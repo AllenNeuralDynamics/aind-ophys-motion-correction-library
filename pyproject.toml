@@ -23,7 +23,7 @@ dependencies = [
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
     "aind-ophys-utils==0.2.0",
     "torch==2.13.0",
-    "suite2p==0.14.6",
+    "suite2p==1.1.0",
     "sbxreader==0.2.3",
     "numpy==2.2.6",
     "pandas==2.3.3",
