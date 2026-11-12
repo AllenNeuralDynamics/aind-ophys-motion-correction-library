@@ -100,7 +100,7 @@ class TestMetadataBehindSymlink(unittest.TestCase):
         }
         with _behind_symlink(files) as root:
             metadata = mu.load_motion_correction_metadata(root)
-        self.assertEqual(metadata.instrument_id, "MESO.2")
+        self.assertEqual(metadata.raw_format, "mesoscope_aind")
         self.assertEqual(metadata.dataset_name, "multiplane_session")
         self.assertEqual(len(metadata.fov_ids), 8)
 

@@ -5,7 +5,7 @@
 [![semantic-release: angular](https://img.shields.io/badge/semantic--release-angular-e10079?logo=semantic-release)](https://github.com/semantic-release/semantic-release)
 ![Interrogate](https://img.shields.io/badge/interrogate-100.0%25-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
-![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
+![Python](https://img.shields.io/badge/python->=3.10,<3.13-blue?logo=python)
 
 Suite2P-based motion correction for AIND optical physiology, with
 `aind-data-schema` v2 metadata I/O.
@@ -66,8 +66,8 @@ rate source.
 
 The `MotionCorrectionMetadata` view over v1/v2 metadata
 (`load_motion_correction_metadata`), canonical plane-id resolution
-(`resolve_plane_id`), the Bergamo conditioning-epoch TIFF stem
-(`bci_epoch_tiff_stem`), and the `Code` block (`build_code`).
+(`resolve_plane_id`), the reference-epoch TIFF stems
+(`reference_epoch_tiff_stems`), and the `Code` block (`build_code`).
 
 ## Outputs
 
@@ -85,7 +85,7 @@ plane basename:
 | `processing.json` | full `Processing` document for this plane |
 | `quality_control.json` | full `QualityControl` document for this plane |
 
-Bergamo single-plane runs additionally write `trial_locations.json` and
+TIFF-stack single-plane runs additionally write `trial_locations.json` and
 `epoch_locations.json`. `flow_png` writes `*_PC<n>low/high/rof.png` beside the
 registration summary when registration principal components are available.
 
