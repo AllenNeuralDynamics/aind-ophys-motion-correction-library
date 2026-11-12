@@ -3,20 +3,20 @@
   "describedBy": "https://raw.githubusercontent.com/AllenNeuralDynamics/aind-data-schema/main/src/aind_data_schema/core/acquisition.py",
   "schema_version": "2.5.3",
   "protocol_id": null,
-  "subject_id": "999998",
+  "subject_id": "748832",
   "specimen_id": null,
-  "acquisition_start_time": "2025-01-01 16:20:54.073999-08:00",
+  "acquisition_start_time": "2024-12-04 16:20:54.073999-08:00",
   "acquisition_start_tz": -8,
-  "acquisition_end_time": "2025-01-01 17:16:23.227391-08:00",
+  "acquisition_end_time": "2024-12-04 17:16:23.227391-08:00",
   "experimenters": [
-    "Experimenter A"
+    "Marton Rozsa"
   ],
   "ethics_review_id": [
-    "0000"
+    "2109"
   ],
   "instrument_id": "442_Bergamo_2p_photostim",
   "acquisition_type": "BCI",
-  "notes": "",
+  "notes": "photostim same as yesterday",
   "coordinate_system": null,
   "global_coordinate_system": null,
   "calibrations": [],
@@ -24,8 +24,8 @@
   "data_streams": [
     {
       "object_type": "Data stream",
-      "stream_start_time": "2025-01-01 16:25:18.701000-08:00",
-      "stream_end_time": "2025-01-01 16:25:46.699605-08:00",
+      "stream_start_time": "2024-12-04 16:25:18.701000-08:00",
+      "stream_end_time": "2024-12-04 16:25:46.699605-08:00",
       "modalities": [
         {
           "name": "Planar optical physiology",
@@ -130,8 +130,8 @@
     },
     {
       "object_type": "Data stream",
-      "stream_start_time": "2025-01-01 16:20:54.073999-08:00",
-      "stream_end_time": "2025-01-01 16:22:19.789601-08:00",
+      "stream_start_time": "2024-12-04 16:20:54.073999-08:00",
+      "stream_end_time": "2024-12-04 16:22:19.789601-08:00",
       "modalities": [
         {
           "name": "Planar optical physiology",
@@ -236,8 +236,8 @@
     },
     {
       "object_type": "Data stream",
-      "stream_start_time": "2025-01-01 16:27:21.836999-08:00",
-      "stream_end_time": "2025-01-01 16:31:02.400716-08:00",
+      "stream_start_time": "2024-12-04 16:27:21.836999-08:00",
+      "stream_end_time": "2024-12-04 16:31:02.400716-08:00",
       "modalities": [
         {
           "name": "Planar optical physiology",
@@ -352,8 +352,8 @@
     },
     {
       "object_type": "Data stream",
-      "stream_start_time": "2025-01-01 16:33:18.317000-08:00",
-      "stream_end_time": "2025-01-01 16:53:40.196567-08:00",
+      "stream_start_time": "2024-12-04 16:33:18.317000-08:00",
+      "stream_end_time": "2024-12-04 16:53:40.196567-08:00",
       "modalities": [
         {
           "name": "Planar optical physiology",
@@ -468,8 +468,8 @@
     },
     {
       "object_type": "Data stream",
-      "stream_start_time": "2025-01-01 16:55:51.865000-08:00",
-      "stream_end_time": "2025-01-01 17:16:23.227391-08:00",
+      "stream_start_time": "2024-12-04 16:55:51.865000-08:00",
+      "stream_end_time": "2024-12-04 17:16:23.227391-08:00",
       "modalities": [
         {
           "name": "Planar optical physiology",
@@ -576,8 +576,8 @@
   "stimulus_epochs": [
     {
       "object_type": "Stimulus epoch",
-      "stimulus_start_time": "2025-01-01 16:25:18.701000-08:00",
-      "stimulus_end_time": "2025-01-01 16:25:46.699605-08:00",
+      "stimulus_start_time": "2024-12-04 16:25:18.701000-08:00",
+      "stimulus_end_time": "2024-12-04 16:25:46.699605-08:00",
       "stimulus_name": "spontaneous activity",
       "code": null,
       "stimulus_modalities": [
@@ -592,8 +592,8 @@
     },
     {
       "object_type": "Stimulus epoch",
-      "stimulus_start_time": "2025-01-01 16:20:54.073999-08:00",
-      "stimulus_end_time": "2025-01-01 16:22:19.789601-08:00",
+      "stimulus_start_time": "2024-12-04 16:20:54.073999-08:00",
+      "stimulus_end_time": "2024-12-04 16:22:19.789601-08:00",
       "stimulus_name": "spontaneous activity",
       "code": null,
       "stimulus_modalities": [
@@ -608,14 +608,14 @@
     },
     {
       "object_type": "Stimulus epoch",
-      "stimulus_start_time": "2025-01-01 16:27:21.836999-08:00",
-      "stimulus_end_time": "2025-01-01 16:31:02.400716-08:00",
+      "stimulus_start_time": "2024-12-04 16:27:21.836999-08:00",
+      "stimulus_end_time": "2024-12-04 16:31:02.400716-08:00",
       "stimulus_name": "single neuron BCI conditioning",
       "code": {
         "object_type": "Code",
-        "url": "https://example.com/protocols/pybpod_basic.py",
+        "url": "https://github.com/rozmar/BCI-motor-control/blob/main/BCI-pybpod-protocols/bci_basic.py",
         "name": "pybpod_basic.py",
-        "version": "0000000",
+        "version": "2d77d15",
         "commit_hash": null,
         "container": null,
         "run_script": null,
@@ -668,14 +668,14 @@
     },
     {
       "object_type": "Stimulus epoch",
-      "stimulus_start_time": "2025-01-01 16:33:18.317000-08:00",
-      "stimulus_end_time": "2025-01-01 16:53:40.196567-08:00",
+      "stimulus_start_time": "2024-12-04 16:33:18.317000-08:00",
+      "stimulus_end_time": "2024-12-04 16:53:40.196567-08:00",
       "stimulus_name": "single neuron BCI conditioning",
       "code": {
         "object_type": "Code",
-        "url": "https://example.com/protocols/pybpod_basic.py",
+        "url": "https://github.com/rozmar/BCI-motor-control/blob/main/BCI-pybpod-protocols/bci_basic.py",
         "name": "pybpod_basic.py",
-        "version": "0000000",
+        "version": "2d77d15",
         "commit_hash": null,
         "container": null,
         "run_script": null,
@@ -850,8 +850,8 @@
     },
     {
       "object_type": "Stimulus epoch",
-      "stimulus_start_time": "2025-01-01 16:55:51.865000-08:00",
-      "stimulus_end_time": "2025-01-01 17:16:23.227391-08:00",
+      "stimulus_start_time": "2024-12-04 16:55:51.865000-08:00",
+      "stimulus_end_time": "2024-12-04 17:16:23.227391-08:00",
       "stimulus_name": "2p photostimulation",
       "code": null,
       "stimulus_modalities": [

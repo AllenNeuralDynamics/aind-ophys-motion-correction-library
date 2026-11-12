@@ -61,7 +61,7 @@ def _staged_bergamo_directory() -> Path:
     )
     (directory / "data_description.json").write_text(
         json.dumps(
-            {"name": "single-plane-ophys_999999_2025-01-01_00-00-00"}
+            {"name": "single-plane-ophys_772414_2025-04-11_17-41-16"}
         )
     )
     plane_dir = directory / "plane_0"
@@ -114,7 +114,7 @@ class TestFindSingleplaneInput(unittest.TestCase):
                 directory,
                 Path(tempfile.mkdtemp()),
                 "plane_0",
-                "single-plane-ophys_999999_2025-01-01_00-00-00",
+                "single-plane-ophys_772414_2025-04-11_17-41-16",
             )
 
 
