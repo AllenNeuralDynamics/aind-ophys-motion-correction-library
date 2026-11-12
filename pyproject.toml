@@ -22,7 +22,7 @@ dependencies = [
     "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.4.0",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
     "aind-ophys-utils==0.2.0",
-    "torch==2.13.0",
+    "torch==2.14.1",
     "suite2p==0.14.6",
     "sbxreader==0.2.3",
     "numpy==2.2.6",
