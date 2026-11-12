@@ -272,20 +272,38 @@ def load_initial_frames(
         If ``file_path`` is neither a string nor a list.
     """
     if isinstance(file_path, str):
-        array = h5py_to_numpy(
-            file_path, h5py_key, trim_frames_start, trim_frames_end
-        )
+        with h5py.File(file_path, "r") as f:
+            dataset = f[h5py_key]
+            stop = dataset.shape[0] - trim_frames_end
+            requested_frames = _sampled_frame_indices(
+                stop - trim_frames_start, n_frames
+            )
+            return dataset[trim_frames_start + requested_frames]
     elif isinstance(file_path, list):
         array = tiff_to_numpy(file_path, trim_frames_start, trim_frames_end)
     else:
         raise ValueError("File type not supported")
-    # Total number of frames in the movie.
-    tot_frames = array.shape[0]
-    requested_frames = np.linspace(
+    return array[_sampled_frame_indices(array.shape[0], n_frames)]
+
+
+def _sampled_frame_indices(tot_frames: int, n_frames: int) -> np.ndarray:
+    """Return up to ``n_frames`` indices spaced evenly over ``tot_frames``.
+
+    Parameters
+    ----------
+    tot_frames : int
+        Number of frames to sample from.
+    n_frames : int
+        Number of frames requested.
+
+    Returns
+    -------
+    np.ndarray
+        Strictly increasing frame indices.
+    """
+    return np.linspace(
         0, tot_frames, 1 + min(n_frames, tot_frames), dtype=int
     )[:-1]
-    frames = array[requested_frames]
-    return frames
 
 
 def combine_images_with_individual_titles(
@@ -1838,7 +1856,7 @@ def generate_single_plane_reference(
     core: CoreMetadata,
     scratch_dir: Path,
 ) -> Path:
-    """Generate the Bergamo reference movie from the conditioning epoch.
+    """Build the reference movie from the reference epochs' frames.
 
     Parameters
     ----------
@@ -1857,17 +1875,18 @@ def generate_single_plane_reference(
     reference_fp = Path(scratch_dir) / "reference_image.h5"
     with h5py.File(fp, "r") as f:
         tiff_stems = json.loads(f["epoch_locations"][:][0])
-        bci_epoch_loc = mu.bci_epoch_tiff_stem(core)
-        frame_length = (
-            tiff_stems[bci_epoch_loc][1] - tiff_stems[bci_epoch_loc][0]
-        )
+        ranges = [
+            tiff_stems[stem] for stem in mu.reference_epoch_tiff_stems(core)
+        ]
+        frame_length = sum(stop - start for start, stop in ranges)
         vsource = h5py.VirtualSource(f["data"])
         layout = h5py.VirtualLayout(
             shape=(frame_length, *f["data"].shape[1:]), dtype=f["data"].dtype
         )
-        layout[0:frame_length] = vsource[
-            tiff_stems[bci_epoch_loc][0] : tiff_stems[bci_epoch_loc][1]
-        ]
+        offset = 0
+        for start, stop in ranges:
+            layout[offset : offset + stop - start] = vsource[start:stop]
+            offset += stop - start
 
         with h5py.File(reference_fp, "w") as ref:
             ref.create_virtual_dataset("data", layout)

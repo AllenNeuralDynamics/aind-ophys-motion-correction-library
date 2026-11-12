@@ -13,17 +13,13 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 from aind_data_schema.components.identifiers import Code
-from aind_pophys_metadata import CoreMetadata
+from aind_pophys_metadata import RAW_FORMAT_TIFF_STACK, CoreMetadata
 from aind_pophys_metadata import processing as shared_processing
 
 logger = logging.getLogger(__name__)
 
 # Plane id used when the acquisition metadata declares no planes at all.
 DEFAULT_PLANE_ID = "plane_0"
-
-# Bergamo single-plane acquisitions take their reference movie from the first
-# conditioning epoch.
-BCI_STIMULUS_NAME = "single neuron BCI conditioning"
 
 
 @dataclass(frozen=True)
@@ -35,8 +31,10 @@ class MotionCorrectionMetadata:
     frame_rate : float or None
         Acquisition frame rate in Hz; drives temporal detrending and preview
         downsampling. ``None`` when no source supplied one.
-    instrument_id : str or None
-        Instrument/rig identifier, used only to route Bergamo acquisitions.
+    raw_format : str or None
+        Raw movie layout (``aind_pophys_metadata.RAW_FORMATS``). A TIFF stack
+        is one stitched single-plane movie with a reference movie built from
+        its reference epochs.
     subject_id : str or None
         Subject identifier, used only for logging.
     dataset_name : str or None
@@ -49,7 +47,7 @@ class MotionCorrectionMetadata:
     """
 
     frame_rate: Optional[float] = None
-    instrument_id: Optional[str] = None
+    raw_format: Optional[str] = None
     subject_id: Optional[str] = None
     dataset_name: Optional[str] = None
     fov_ids: Tuple[str, ...] = ()
@@ -95,7 +93,7 @@ def load_motion_correction_metadata(
         frame_rate=core.get_frame_rate(
             cli_override=cli_override, required=False
         ),
-        instrument_id=core.get_instrument_id(),
+        raw_format=core.get_raw_format(),
         subject_id=core.get_subject_id(),
         dataset_name=core.get_dataset_name(),
         fov_ids=core.get_fov_ids(),
@@ -157,8 +155,24 @@ def resolve_plane_id(
     return fallback
 
 
-def bci_epoch_tiff_stem(core: CoreMetadata) -> str:
-    """Return the TIFF stem of the first BCI conditioning epoch.
+def is_tiff_stack(metadata: MotionCorrectionMetadata) -> bool:
+    """Return whether the acquisition is a stitched single-plane TIFF stack.
+
+    Parameters
+    ----------
+    metadata : MotionCorrectionMetadata
+        The acquisition metadata view.
+
+    Returns
+    -------
+    bool
+        True when the raw format is ``tiff_stack``.
+    """
+    return metadata.raw_format == RAW_FORMAT_TIFF_STACK
+
+
+def reference_epoch_tiff_stems(core: CoreMetadata) -> Tuple[str, ...]:
+    """Return the TIFF stems of the epochs that form the reference movie.
 
     Epochs are read in document order, which is the order the acquisition
     recorded and is not necessarily chronological.
@@ -170,26 +184,28 @@ def bci_epoch_tiff_stem(core: CoreMetadata) -> str:
 
     Returns
     -------
-    str
-        The conditioning epoch's TIFF stem.
+    tuple of str
+        The reference epochs' TIFF stems.
 
     Raises
     ------
     ValueError
-        If no conditioning epoch carries a stem. The message names the
-        stimulus and the core file, so an acquisition missing the stem is
-        distinguishable from an unrelated one.
+        If no reference epoch carries a stem. The message names the core
+        file, so an acquisition missing the stem is distinguishable from an
+        unrelated one.
     """
-    for epoch in core.get_epoch_records():
-        if epoch.get("stimulus_name") != BCI_STIMULUS_NAME:
-            continue
-        if epoch.get("tiff_stem"):
-            return epoch["tiff_stem"]
-    raise ValueError(
-        f"No {BCI_STIMULUS_NAME!r} stimulus epoch carrying a tiff stem was "
-        f"found in {Path(core.core_path).name}; the Bergamo reference "
-        "movie cannot be built."
+    stems = tuple(
+        epoch["tiff_stem"]
+        for epoch in core.get_epoch_records()
+        if epoch["reference"] and epoch["tiff_stem"]
     )
+    if not stems:
+        raise ValueError(
+            "No reference stimulus epoch carrying a tiff stem was found in "
+            f"{Path(core.core_path).name}; the single-plane reference movie "
+            "cannot be built."
+        )
+    return stems
 
 
 def build_code(

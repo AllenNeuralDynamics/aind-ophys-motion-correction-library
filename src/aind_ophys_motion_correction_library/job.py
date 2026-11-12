@@ -37,7 +37,6 @@ logger = logging.getLogger("Suite2P motion correction")
 
 PROCESS_NAME = "aind-ophys-motion-correction"
 DATA_PROCESS_NAME = "Suite2P motion correction"
-_BERGAMO_INSTRUMENT = "Bergamo"
 
 # Output filename suffixes appended to the plane basename.
 _OUTPUT_SUFFIXES = (
@@ -49,22 +48,6 @@ _OUTPUT_SUFFIXES = (
     ("motion_correction_preview_output", "_motion_preview.webm"),
     ("output_json", "_motion_correction_output.json"),
 )
-
-
-def _is_bergamo(metadata: mu.MotionCorrectionMetadata) -> bool:
-    """Return whether this acquisition came off a Bergamo rig.
-
-    Parameters
-    ----------
-    metadata : mu.MotionCorrectionMetadata
-        The acquisition metadata view.
-
-    Returns
-    -------
-    bool
-        True for a Bergamo single-plane acquisition.
-    """
-    return _BERGAMO_INSTRUMENT in (metadata.instrument_id or "")
 
 
 def _resolve_plane_input(
@@ -109,7 +92,7 @@ def _resolve_plane_input(
             data_dir, "*/pophys", required=False
         ) or find_one(data_dir, "pophys")
         output_dir = reg.make_output_directory(results_root, unique_id)
-    elif data_type == "h5" and _is_bergamo(metadata):
+    elif data_type == "h5" and mu.is_tiff_stack(metadata):
         # The Bergamo converter names its stitched movie after the plane id
         # (e.g. plane_0/plane_0.h5) -- the same id this task uses to name its
         # own output directory -- so one value serves as both.
@@ -171,7 +154,7 @@ def _prepare_movie(
     """
     if settings.data_type.lower() != "h5":
         return
-    if _is_bergamo(metadata):
+    if mu.is_tiff_stack(metadata):
         input_file, _, reference_image_fp = reg.singleplane_motion_correction(
             Path(ctx["input_file"]),
             ctx["output_dir"],
